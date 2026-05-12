@@ -27,14 +27,15 @@ public:
 
 private:
     using Clock = std::chrono::steady_clock;
-    uint64_t ComputeNowLocked(Clock::time_point now) const;
+    static int64_t ToSteadyNanoseconds(Clock::time_point time_point);
+    uint64_t ComputeNowLocked(int64_t now_ns) const;
 
     mutable std::mutex mutex_;
     std::atomic<uint64_t> origin_ns_{0};
     std::atomic<double> speed_{1.0};
     std::atomic<bool> paused_{true};
     std::atomic<uint64_t> paused_at_ns_{0};
-    std::chrono::steady_clock::time_point clock_start_;
+    std::atomic<int64_t> clock_start_ns_{0};
 };
 
 } // namespace recplay

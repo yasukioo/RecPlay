@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_definitions(_WIN32_WINNT=0x0601)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FixCppMicroServicesPackage.cmake)
+recplay_fix_cppmicroservices_package_exports()
+
 find_package(CppMicroServices QUIET COMPONENTS Framework)
 find_package(Boost QUIET COMPONENTS system)
 find_package(nlohmann_json QUIET)

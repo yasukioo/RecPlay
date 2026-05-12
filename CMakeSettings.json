@@ -1,0 +1,22 @@
+﻿{
+  "configurations": [
+    {
+      "name": "x64-Debug",
+      "generator": "Ninja",
+      "configurationType": "Debug",
+      "inheritEnvironments": [ "msvc_x64_x64" ],
+      "buildRoot": "${projectDir}\\out\\build\\${name}",
+      "installRoot": "${projectDir}\\out\\install\\${name}",
+      "cmakeCommandArgs": "",
+      "buildCommandArgs": "",
+      "ctestCommandArgs": "",
+      "variables": [
+        {
+          "name": "CppMicroServices_DIR",
+          "value": "D:/yasukioo/github/RecPlay/out/build/x64-Debug/vcpkg_installed/x64-windows/share/cppmicroservices/cmake",
+          "type": "PATH"
+        }
+      ]
+    }
+  ]
+}
