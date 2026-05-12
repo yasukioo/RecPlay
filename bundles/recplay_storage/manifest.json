@@ -1,0 +1,5 @@
+{
+  "bundle.symbolic_name": "recplay_storage",
+  "bundle.version": "1.0.0",
+  "bundle.activator": true
+}

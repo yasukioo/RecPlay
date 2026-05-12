@@ -1,0 +1,38 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "web_root": "web"
+  },
+  "storage": {
+    "default_codec": "zstd",
+    "chunk_size_mb": 64,
+    "output_directory": "data"
+  },
+  "engine": {
+    "ring_buffer_capacity": 65536,
+    "default_speed": 1.0,
+    "dispatch_threads": 1
+  },
+  "bundles": {
+    "search_paths": [
+      "bundles",
+      "build/bundles"
+    ],
+    "auto_start": [
+      "recplay_core",
+      "recplay_session",
+      "recplay_webserver",
+      "recplay_storage",
+      "recplay_stats",
+      "protocol_udp",
+      "protocol_tcp",
+      "codec_zstd"
+    ]
+  },
+  "injector": {
+    "static_rules": [],
+    "lua_scripts": [],
+    "js_scripts": []
+  }
+}

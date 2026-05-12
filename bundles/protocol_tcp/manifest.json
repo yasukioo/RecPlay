@@ -1,0 +1,5 @@
+{
+  "bundle.symbolic_name": "protocol_tcp",
+  "bundle.version": "1.0.0",
+  "bundle.activator": true
+}

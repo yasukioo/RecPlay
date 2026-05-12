@@ -1,0 +1,1 @@
+recplay_add_bundle(recplay_webserver EXTRA_LIBS recplay_drogon recplay_spdlog recplay_json)

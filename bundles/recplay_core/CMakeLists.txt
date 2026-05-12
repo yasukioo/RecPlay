@@ -1,0 +1,1 @@
+recplay_add_bundle(recplay_core EXTRA_LIBS recplay_boost_system recplay_spdlog recplay_json)

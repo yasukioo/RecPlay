@@ -1,0 +1,1 @@
+recplay_add_bundle(recplay_storage EXTRA_LIBS recplay_zstd recplay_spdlog recplay_json)

@@ -1,0 +1,40 @@
+// Copyright (c) 2026 yasukioo
+// Author: yasukioo <yasukioo@outlook.com>
+
+#pragma once
+
+#include "IStorageService.h"
+#include "RpcapReader.h"
+#include "RpcapWriter.h"
+
+namespace recplay {
+
+class StorageService final : public IStorageService {
+public:
+    bool CreateFile(const std::string& path,
+                    const std::vector<ChannelInfo>& channels,
+                    const std::string& codec = "zstd") override;
+    bool WritePacket(PacketPtr pkt) override;
+    bool FinalizeFile() override;
+
+    bool OpenFile(const std::string& path) override;
+    void CloseFile() override;
+    RpcapHeader GetHeader() const override;
+    std::vector<ChannelInfo> GetChannels() const override;
+
+    bool SeekTo(uint64_t timestamp_ns) override;
+    PacketPtr ReadNext() override;
+    bool HasMore() const override;
+    std::vector<uint64_t> GetKeyframeTimestamps() const override;
+
+    bool IsWriting() const override;
+    bool IsReading() const override;
+
+private:
+    RpcapWriter writer_;
+    RpcapReader reader_;
+    bool writing_ = false;
+    bool reading_ = false;
+};
+
+} // namespace recplay
