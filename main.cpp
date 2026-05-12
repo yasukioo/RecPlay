@@ -3,10 +3,13 @@
 
 #include <cppmicroservices/FrameworkFactory.h>
 #include <cppmicroservices/Framework.h>
+#include <cppmicroservices/FrameworkEvent.h>
 #include <cppmicroservices/Bundle.h>
+#include <cppmicroservices/BundleContext.h>
 
 #include <atomic>
 #include <csignal>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -108,7 +111,7 @@ RuntimeConfig LoadConfig(const std::string& path) {
     return config;
 }
 
-void InstallBundles(const cppmicroservices::BundleContext& context,
+void InstallBundles(cppmicroservices::BundleContext context,
                     const RuntimeConfig& config) {
     std::vector<std::string> bundle_locations;
 
@@ -135,7 +138,12 @@ void InstallBundles(const cppmicroservices::BundleContext& context,
         return;
     }
 
-    auto installed = context.InstallBundles(bundle_locations);
+    std::vector<cppmicroservices::Bundle> installed;
+    installed.reserve(bundle_locations.size());
+    for (const auto& location : bundle_locations) {
+        auto bundles = context.InstallBundles(location);
+        installed.insert(installed.end(), bundles.begin(), bundles.end());
+    }
     LogInfo("installed " + std::to_string(installed.size()) + " bundle(s)");
 
     for (const auto& bundle_name : config.auto_start) {
@@ -164,7 +172,7 @@ int main(int argc, char* argv[]) {
         LogInfo("framework started");
 
         InstallBundles(framework.GetBundleContext(), config);
-        framework.WaitForStop();
+        framework.WaitForStop(std::chrono::milliseconds::max());
         g_framework.store(nullptr, std::memory_order_release);
         LogInfo("framework stopped");
         return 0;
