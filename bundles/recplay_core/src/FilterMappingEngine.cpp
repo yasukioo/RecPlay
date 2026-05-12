@@ -31,6 +31,7 @@ bool FilterMappingEngine::LoadMapping(const std::string& jsonPath) {
         parsed_mappings[mapping.source_channel] = std::move(mapping);
     }
 
+    std::lock_guard<std::mutex> lock(mutex_);
     mappings_ = std::move(parsed_mappings);
     return true;
 #else
@@ -44,25 +45,45 @@ PacketPtr FilterMappingEngine::ApplyMapping(PacketPtr pkt) const {
         return nullptr;
     }
 
-    auto mutable_packet = std::make_shared<Packet>(*pkt);
-    const auto it = mappings_.find(mutable_packet->channel_id);
-    if (it != mappings_.end()) {
-        mutable_packet->channel_id = it->second.target_channel;
-        if (!it->second.target_topic.empty()) {
-            mutable_packet->topic = it->second.target_topic;
+    Mapping mapping;
+    bool has_mapping = false;
+    std::set<uint32_t> enabled_channels;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = mappings_.find(pkt->channel_id);
+        if (it != mappings_.end()) {
+            mapping = it->second;
+            has_mapping = true;
         }
+        enabled_channels = enabled_channels_;
     }
-    if (!enabled_channels_.empty() && !IsChannelEnabled(mutable_packet->channel_id)) {
+
+    const uint32_t effective_channel = has_mapping ? mapping.target_channel : pkt->channel_id;
+    if (!enabled_channels.empty() && enabled_channels.count(effective_channel) == 0) {
         return nullptr;
+    }
+
+    const bool remap_topic = has_mapping && !mapping.target_topic.empty() && mapping.target_topic != pkt->topic;
+    const bool remap_channel = has_mapping && mapping.target_channel != pkt->channel_id;
+    if (!remap_channel && !remap_topic) {
+        return pkt;
+    }
+
+    auto mutable_packet = std::make_shared<Packet>(*pkt);
+    mutable_packet->channel_id = effective_channel;
+    if (remap_topic) {
+        mutable_packet->topic = mapping.target_topic;
     }
     return mutable_packet;
 }
 
 void FilterMappingEngine::SetChannelFilter(std::set<uint32_t> enabledChannels) {
+    std::lock_guard<std::mutex> lock(mutex_);
     enabled_channels_ = std::move(enabledChannels);
 }
 
 bool FilterMappingEngine::IsChannelEnabled(uint32_t channelId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return enabled_channels_.empty() || enabled_channels_.count(channelId) > 0;
 }
 

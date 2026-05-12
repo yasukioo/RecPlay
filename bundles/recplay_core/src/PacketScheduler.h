@@ -25,8 +25,10 @@ public:
     void Stop();
 
 private:
+    using Clock = std::chrono::steady_clock;
+
     struct TimedPacket {
-        uint64_t dispatch_time = 0;
+        Clock::time_point dispatch_time{};
         PacketPtr packet;
 
         bool operator>(const TimedPacket& other) const {
@@ -34,6 +36,7 @@ private:
         }
     };
 
+    Clock::time_point ComputeDispatchTime(uint64_t capture_time_ns) const;
     void SchedulerLoop();
 
     TimelineEngine& timeline_;

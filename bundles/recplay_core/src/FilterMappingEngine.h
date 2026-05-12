@@ -6,6 +6,7 @@
 #include "Packet.h"
 
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 
@@ -25,6 +26,7 @@ private:
         std::string target_topic;
     };
 
+    mutable std::mutex mutex_;
     std::map<uint32_t, Mapping> mappings_;
     std::set<uint32_t> enabled_channels_;
 };

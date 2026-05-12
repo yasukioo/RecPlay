@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -26,9 +27,11 @@ private:
     struct StaticRule {
         uint32_t channel_id = 0;
         size_t offset = 0;
+        bool drop = false;
         std::vector<uint8_t> replace;
     };
 
+    mutable std::mutex mutex_;
     std::vector<StaticRule> static_rules_;
     std::vector<std::string> lua_scripts_;
     std::vector<std::string> js_scripts_;

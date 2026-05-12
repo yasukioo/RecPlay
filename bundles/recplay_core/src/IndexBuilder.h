@@ -12,7 +12,12 @@ namespace recplay {
 
 class IndexBuilder {
 public:
-    void AddPacket(uint64_t ts, uint32_t chunkId, uint64_t offset, uint32_t channelId);
+    void AddPacket(
+        uint64_t ts,
+        uint32_t chunkId,
+        uint64_t offset,
+        uint32_t channelId,
+        bool isKeyframe = false);
 
     std::map<uint64_t, std::pair<uint32_t, uint64_t>> BuildTimeIndex() const;
     std::map<uint32_t, std::vector<uint64_t>> BuildTopicIndex() const;
@@ -24,6 +29,7 @@ private:
         uint32_t chunkId = 0;
         uint64_t offset = 0;
         uint32_t channelId = 0;
+        bool isKeyframe = false;
     };
 
     std::vector<Entry> entries_;
