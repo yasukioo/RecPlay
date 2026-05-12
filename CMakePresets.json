@@ -4,11 +4,19 @@
     {
       "name": "vcpkg-debug",
       "displayName": "Vcpkg Debug",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-vcpkg-vs",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        "CMAKE_TOOLCHAIN_FILE": "D:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      },
+      "environment": {
+        "VCPKG_ROOT": "D:/vcpkg",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.version",
+        "GIT_CONFIG_VALUE_0": "HTTP/1.1"
       }
     }
   ]

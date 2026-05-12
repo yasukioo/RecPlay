@@ -5,6 +5,7 @@ project(RecPlay VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+add_compile_definitions(_WIN32_WINNT=0x0601)
 
 find_package(CppMicroServices QUIET COMPONENTS Framework)
 find_package(Boost QUIET COMPONENTS system)
@@ -20,8 +21,16 @@ target_include_directories(recplay_interfaces
 )
 
 add_library(recplay_framework INTERFACE)
-if(TARGET CppMicroServices::Framework)
+if(TARGET CppMicroServices)
+    target_link_libraries(recplay_framework INTERFACE CppMicroServices)
+elseif(TARGET CppMicroServices::Framework)
     target_link_libraries(recplay_framework INTERFACE CppMicroServices::Framework)
+endif()
+if(DEFINED VCPKG_TARGET_TRIPLET)
+    target_include_directories(recplay_framework
+        INTERFACE
+            ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include/cppmicroservices3
+    )
 endif()
 
 add_library(recplay_boost_system INTERFACE)
