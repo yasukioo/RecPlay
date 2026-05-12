@@ -23,6 +23,7 @@ public:
     void Enqueue(PacketPtr pkt);
     void Start(std::function<void(PacketPtr)> dispatchFn);
     void Stop();
+    void Clear();
 
 private:
     using Clock = std::chrono::steady_clock;

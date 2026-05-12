@@ -30,6 +30,16 @@ void CoreEngine::SetCodecService(ICodecService* codec) {
     codec_ = codec;
 }
 
+IStorageService* CoreEngine::Storage() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return storage_;
+}
+
+ICodecService* CoreEngine::Codec() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return codec_;
+}
+
 void CoreEngine::AttachProtocol(const std::string& name, IProtocolService* protocol) {
     if (!protocol) {
         return;
@@ -146,6 +156,26 @@ void CoreEngine::DispatchPacketToReplayingProtocols(PacketPtr pkt) {
     for (auto* service : services) {
         service->SendPacket(pkt);
     }
+}
+
+std::vector<std::string> CoreEngine::GetAttachedProtocolNames() const {
+    std::vector<std::string> names;
+    std::lock_guard<std::mutex> lock(mutex_);
+    names.reserve(protocols_.size());
+    for (const auto& [name, runtime] : protocols_) {
+        if (runtime != nullptr && runtime->service != nullptr) {
+            names.push_back(name);
+        }
+    }
+    return names;
+}
+
+std::vector<ChannelInfo> CoreEngine::GetChannelsForProtocol(const std::string& name) const {
+    auto runtime = FindProtocolRuntime(name);
+    if (runtime == nullptr || runtime->service == nullptr) {
+        return {};
+    }
+    return runtime->service->GetChannels();
 }
 
 std::shared_ptr<CoreEngine::ProtocolRuntime> CoreEngine::FindProtocolRuntime(

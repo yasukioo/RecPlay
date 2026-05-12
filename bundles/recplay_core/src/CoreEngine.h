@@ -37,6 +37,8 @@ public:
 
     void SetStorageService(IStorageService* storage);
     void SetCodecService(ICodecService* codec);
+    IStorageService* Storage() const;
+    ICodecService* Codec() const;
 
     void AttachProtocol(const std::string& name, IProtocolService* protocol);
     void DetachProtocol(const std::string& name);
@@ -45,6 +47,8 @@ public:
     bool StartProtocolReplay(const std::string& name, const std::string& configJson);
     void StopProtocolReplay(const std::string& name);
     void DispatchPacketToReplayingProtocols(PacketPtr pkt);
+    std::vector<std::string> GetAttachedProtocolNames() const;
+    std::vector<ChannelInfo> GetChannelsForProtocol(const std::string& name) const;
 
 private:
     using ProtocolQueue = SPSCRingBuffer<PacketPtr, 1024>;

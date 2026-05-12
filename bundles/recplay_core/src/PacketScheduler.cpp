@@ -33,6 +33,12 @@ void PacketScheduler::Stop() {
     }
 }
 
+void PacketScheduler::Clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_ = decltype(queue_)();
+    cv_.notify_all();
+}
+
 void PacketScheduler::SchedulerLoop() {
     while (running_.load(std::memory_order_acquire)) {
         PacketPtr pkt;

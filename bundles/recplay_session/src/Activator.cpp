@@ -25,6 +25,22 @@ public:
 
     void Stop(cppmicroservices::BundleContext context) override {
         (void)context;
+        if (controller_ != nullptr) {
+            switch (controller_->GetState()) {
+                case SessionState::Recording:
+                case SessionState::RecordingPaused:
+                    controller_->StopRecording();
+                    break;
+                case SessionState::Playing:
+                case SessionState::PlaybackPaused:
+                case SessionState::Seeking:
+                    controller_->Stop();
+                    break;
+                case SessionState::Idle:
+                case SessionState::Stopped:
+                    break;
+            }
+        }
         controller_.reset();
         core_engine_.reset();
     }

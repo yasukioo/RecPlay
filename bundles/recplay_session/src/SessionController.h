@@ -6,8 +6,10 @@
 #include "ISessionService.h"
 #include "SessionStateMachine.h"
 
+#include <mutex>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace recplay {
 
@@ -35,9 +37,13 @@ public:
     double GetCurrentSpeed() const override;
 
 private:
+    void StopRecordingProtocols();
+    void StopReplayProtocols();
+    bool FillPlaybackQueue();
     void PublishState(SessionState from, SessionState next);
 
     CoreEngine* engine_ = nullptr;
+    mutable std::mutex mutex_;
     SessionStateMachine machine_;
     StateCallback state_cb_;
     uint64_t duration_ns_ = 0;
@@ -45,6 +51,10 @@ private:
     double current_speed_ = 1.0;
     uint64_t loop_start_ns_ = 0;
     uint64_t loop_end_ns_ = 0;
+    std::vector<std::string> active_record_protocols_;
+    std::vector<std::string> active_replay_protocols_;
+    std::string current_record_path_;
+    std::string current_playback_file_;
 };
 
 } // namespace recplay

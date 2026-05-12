@@ -10,9 +10,11 @@
 #include <atomic>
 #include <csignal>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -33,6 +35,7 @@ namespace {
 std::atomic<cppmicroservices::Framework*> g_framework{nullptr};
 
 struct RuntimeConfig {
+    std::filesystem::path config_path;
     std::vector<std::string> bundle_search_paths{"bundles", "build/bundles"};
     std::vector<std::string> auto_start{
         "recplay_core",
@@ -47,8 +50,19 @@ struct RuntimeConfig {
 };
 
 std::string ResolveConfigPath(int argc, char* argv[]) {
-    if (argc > 1 && argv[1] != nullptr && std::string(argv[1]).size() > 0) {
-        return argv[1];
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] == nullptr) {
+            continue;
+        }
+
+        const std::string arg = argv[i];
+        if ((arg == "--config" || arg == "-c") && (i + 1) < argc && argv[i + 1] != nullptr) {
+            return argv[i + 1];
+        }
+
+        if (!arg.empty() && arg[0] != '-') {
+            return arg;
+        }
     }
     return "config/recplay.json";
 }
@@ -70,9 +84,9 @@ void LogError(const std::string& message) {
 }
 
 void HandleSignal(int signal_number) {
+    (void)signal_number;
     auto* framework = g_framework.load(std::memory_order_acquire);
     if (framework != nullptr) {
-        LogInfo("received shutdown signal " + std::to_string(signal_number));
         framework->Stop();
     }
 }
@@ -84,6 +98,13 @@ void RegisterSignalHandlers() {
 #endif
 }
 
+void InitializeLogging() {
+#if RECPLAY_HAS_SPDLOG
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+    spdlog::flush_on(spdlog::level::info);
+#endif
+}
+
 RuntimeConfig LoadConfig(const std::string& path) {
     std::ifstream input(path);
     if (!input.is_open()) {
@@ -91,6 +112,7 @@ RuntimeConfig LoadConfig(const std::string& path) {
     }
 
     RuntimeConfig config;
+    config.config_path = std::filesystem::absolute(path);
 #if __has_include(<nlohmann/json.hpp>)
     nlohmann::json document;
     input >> document;
@@ -113,11 +135,20 @@ RuntimeConfig LoadConfig(const std::string& path) {
 
 void InstallBundles(cppmicroservices::BundleContext context,
                     const RuntimeConfig& config) {
+    const auto config_root = config.config_path.empty()
+        ? std::filesystem::current_path()
+        : config.config_path.parent_path();
     std::vector<std::string> bundle_locations;
+    std::set<std::filesystem::path> seen_locations;
 
     for (const auto& raw_path : config.bundle_search_paths) {
-        const std::filesystem::path root(raw_path);
+        auto root = std::filesystem::path(raw_path);
+        if (root.is_relative()) {
+            root = config_root / root;
+        }
+        root = std::filesystem::weakly_canonical(root);
         if (!std::filesystem::exists(root) || !std::filesystem::is_directory(root)) {
+            LogInfo("bundle search path missing: " + root.string());
             continue;
         }
 
@@ -129,7 +160,10 @@ void InstallBundles(cppmicroservices::BundleContext context,
             if (ext != ".dll" && ext != ".so" && ext != ".dylib") {
                 continue;
             }
-            bundle_locations.push_back(entry.path().string());
+            const auto canonical_path = std::filesystem::weakly_canonical(entry.path());
+            if (seen_locations.insert(canonical_path).second) {
+                bundle_locations.push_back(canonical_path.string());
+            }
         }
     }
 
@@ -141,17 +175,23 @@ void InstallBundles(cppmicroservices::BundleContext context,
     std::vector<cppmicroservices::Bundle> installed;
     installed.reserve(bundle_locations.size());
     for (const auto& location : bundle_locations) {
+        LogInfo("installing bundle binary: " + location);
         auto bundles = context.InstallBundles(location);
         installed.insert(installed.end(), bundles.begin(), bundles.end());
     }
     LogInfo("installed " + std::to_string(installed.size()) + " bundle(s)");
 
     for (const auto& bundle_name : config.auto_start) {
+        bool started = false;
         for (auto& bundle : installed) {
             if (bundle.GetSymbolicName() == bundle_name) {
                 LogInfo("starting bundle: " + bundle_name);
                 bundle.Start();
+                started = true;
             }
+        }
+        if (!started) {
+            LogInfo("auto-start bundle not found: " + bundle_name);
         }
     }
 }
@@ -160,10 +200,11 @@ void InstallBundles(cppmicroservices::BundleContext context,
 
 int main(int argc, char* argv[]) {
     try {
+        InitializeLogging();
         const auto config_path = ResolveConfigPath(argc, argv);
         RegisterSignalHandlers();
         const auto config = LoadConfig(config_path);
-        LogInfo("loaded config from " + config_path);
+        LogInfo("loaded config from " + config.config_path.string());
 
         cppmicroservices::FrameworkFactory factory;
         auto framework = factory.NewFramework();
