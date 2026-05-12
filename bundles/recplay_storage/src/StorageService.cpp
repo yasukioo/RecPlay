@@ -59,7 +59,7 @@ bool StorageService::HasMore() const {
 }
 
 std::vector<uint64_t> StorageService::GetKeyframeTimestamps() const {
-    return {};
+    return reader_.GetKeyframeTimestamps();
 }
 
 bool StorageService::IsWriting() const {
