@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_definitions(_WIN32_WINNT=0x0601)
+enable_testing()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FixCppMicroServicesPackage.cmake)
 recplay_fix_cppmicroservices_package_exports()
@@ -102,3 +103,5 @@ else()
         COMMAND ${CMAKE_COMMAND} -E echo "npm was not found; skipping web build."
     )
 endif()
+
+add_subdirectory(tests)
