@@ -55,8 +55,8 @@ private:
     std::atomic<bool> running_{false};
     bool drogon_configured_ = false;
     std::thread server_thread_;
-    ISessionService* session_ = nullptr;
-    IStatsService* stats_ = nullptr;
+    std::atomic<ISessionService*> session_{nullptr};
+    std::atomic<IStatsService*> stats_{nullptr};
 };
 
 } // namespace recplay

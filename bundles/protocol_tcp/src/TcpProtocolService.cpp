@@ -131,27 +131,39 @@ bool TcpProtocolService::StartReplay(const std::string& configJson) {
     return false;
 #else
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!io_context_) {
-            io_context_ = std::make_unique<boost::asio::io_context>();
-            work_guard_ = std::make_unique<
-                boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
-                boost::asio::make_work_guard(*io_context_));
-            io_thread_ = std::thread([this] {
-                if (io_context_) {
-                    io_context_->run();
-                }
-            });
+        std::unique_ptr<boost::asio::ip::tcp::socket> socket;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!io_context_) {
+                io_context_ = std::make_unique<boost::asio::io_context>();
+                work_guard_ = std::make_unique<
+                    boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+                    boost::asio::make_work_guard(*io_context_));
+                io_thread_ = std::thread([this] {
+                    if (io_context_) {
+                        io_context_->run();
+                    }
+                });
+            }
+
+            socket = std::make_unique<boost::asio::ip::tcp::socket>(*io_context_);
         }
 
-        replay_socket_ = std::make_unique<boost::asio::ip::tcp::socket>(*io_context_);
-        replay_socket_->connect(boost::asio::ip::tcp::endpoint(
+        socket->connect(boost::asio::ip::tcp::endpoint(
             boost::asio::ip::make_address(config.host),
             config.port));
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!io_context_) {
+            return false;
+        }
+
+        replay_socket_ = std::move(socket);
         replay_config_ = config;
         replaying_ = true;
         return true;
     } catch (...) {
+        std::lock_guard<std::mutex> lock(mutex_);
         replay_socket_.reset();
         replaying_ = false;
         return false;

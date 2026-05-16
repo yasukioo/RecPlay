@@ -301,11 +301,11 @@ bool HttpServer::IsRunning() const {
 }
 
 void HttpServer::SetSessionService(ISessionService* session) {
-    session_ = session;
+    session_.store(session, std::memory_order_release);
 }
 
 void HttpServer::SetStatsService(IStatsService* stats) {
-    stats_ = stats;
+    stats_.store(stats, std::memory_order_release);
 }
 
 HttpResponse HttpServer::HandleRequest(const std::string& method,
@@ -354,25 +354,27 @@ HttpResponse HttpServer::HandleRequest(const std::string& method,
 }
 
 HttpResponse HttpServer::HandleSessionState() const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
 
     std::ostringstream stream;
-    stream << "{\"state\":\"" << SessionStateToString(session_->GetState()) << "\""
-           << ",\"duration_ns\":" << session_->GetDuration()
-           << ",\"position_ns\":" << session_->GetCurrentPosition()
-           << ",\"speed\":" << session_->GetCurrentSpeed()
+    stream << "{\"state\":\"" << SessionStateToString(session->GetState()) << "\""
+           << ",\"duration_ns\":" << session->GetDuration()
+           << ",\"position_ns\":" << session->GetCurrentPosition()
+           << ",\"speed\":" << session->GetCurrentSpeed()
            << "}";
     return MakeJsonResponse(stream.str());
 }
 
 HttpResponse HttpServer::HandleStats() const {
-    if (stats_ == nullptr) {
+    auto* stats = stats_.load(std::memory_order_acquire);
+    if (stats == nullptr) {
         return MakeErrorResponse(503, "Stats service unavailable");
     }
 
-    const auto snapshot = stats_->GetSnapshot();
+    const auto snapshot = stats->GetSnapshot();
     std::ostringstream stream;
     stream << "{\"total_throughput_mbps\":" << snapshot.total_throughput_mbps
            << ",\"total_packets\":" << snapshot.total_packets
@@ -387,41 +389,46 @@ HttpResponse HttpServer::HandleStats() const {
 }
 
 HttpResponse HttpServer::HandleRecordStart(const std::string& body) const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
-    if (!session_->StartRecording(body)) {
+    if (!session->StartRecording(body)) {
         return MakeErrorResponse(400, "Failed to start recording");
     }
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandleRecordPause() const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
-    session_->PauseRecording();
+    session->PauseRecording();
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandleRecordResume() const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
-    session_->ResumeRecording();
+    session->ResumeRecording();
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandleRecordStop() const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
-    session_->StopRecording();
+    session->StopRecording();
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandlePlaybackOpen(const std::string& body) const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
 
@@ -429,14 +436,15 @@ HttpResponse HttpServer::HandlePlaybackOpen(const std::string& body) const {
     if (filePath.empty()) {
         return MakeErrorResponse(400, "file_path is required");
     }
-    if (!session_->OpenForPlayback(filePath)) {
+    if (!session->OpenForPlayback(filePath)) {
         return MakeErrorResponse(400, "Failed to open playback file: " + filePath);
     }
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandlePlaybackPlay(const std::string& body) const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
 
@@ -449,23 +457,25 @@ HttpResponse HttpServer::HandlePlaybackPlay(const std::string& body) const {
     } else if (JsonKeyExists(body, "speed")) {
         return MakeErrorResponse(400, "speed must be numeric");
     }
-    session_->Play(speed);
+    session->Play(speed);
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandlePlaybackPause() const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
-    if (session_->GetState() != SessionState::Playing) {
+    if (session->GetState() != SessionState::Playing) {
         return MakeErrorResponse(409, "Playback is not currently playing");
     }
-    session_->Pause();
+    session->Pause();
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandlePlaybackSeek(const std::string& body) const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
 
@@ -482,12 +492,13 @@ HttpResponse HttpServer::HandlePlaybackSeek(const std::string& body) const {
         return MakeErrorResponse(400, "timestamp_ns must be an unsigned integer");
     }
 
-    session_->SeekTo(timestampNs);
+    session->SeekTo(timestampNs);
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandlePlaybackSpeed(const std::string& body) const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
 
@@ -504,12 +515,13 @@ HttpResponse HttpServer::HandlePlaybackSpeed(const std::string& body) const {
         return MakeErrorResponse(400, "speed must be numeric");
     }
 
-    session_->SetSpeed(speed);
+    session->SetSpeed(speed);
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandlePlaybackLoop(const std::string& body) const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
 
@@ -529,15 +541,16 @@ HttpResponse HttpServer::HandlePlaybackLoop(const std::string& body) const {
         return MakeErrorResponse(400, "start_ns and end_ns must be unsigned integers");
     }
 
-    session_->SetLoopRange(startNs, endNs);
+    session->SetLoopRange(startNs, endNs);
     return MakeJsonResponse("{\"ok\":true}");
 }
 
 HttpResponse HttpServer::HandlePlaybackStop() const {
-    if (session_ == nullptr) {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
-    session_->Stop();
+    session->Stop();
     return MakeJsonResponse("{\"ok\":true}");
 }
 

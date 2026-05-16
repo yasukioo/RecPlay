@@ -17,6 +17,9 @@
 
 #include <exception>
 #include <iostream>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <stdexcept>
 #include <string>
 
@@ -28,6 +31,18 @@ void Expect(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+template <typename Predicate>
+bool WaitUntil(Predicate&& predicate, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
 }
 
 void TestSchemaIncludesTcpFields() {
@@ -109,6 +124,88 @@ void TestCaptureAndReplayStopIndependently() {
 #endif
 }
 
+void TestCapturedPacketsPopulateTimestamps() {
+#if RECPLAY_TEST_HAS_BOOST_ASIO && RECPLAY_TEST_HAS_JSON
+    TcpProtocolService service;
+    const unsigned short port = 39012;
+    const std::string config =
+        R"({"mode":"server","host":"127.0.0.1","port":39012,"channel_id":8,"channel_name":"tcp-ts","topic":"tcp/timestamps"})";
+
+    std::mutex mutex;
+    std::optional<recplay::Packet> captured;
+    Expect(service.StartCapture(config, [&](recplay::PacketPtr packet) {
+        std::lock_guard<std::mutex> lock(mutex);
+        captured = *packet;
+    }), "capture should start for timestamp test");
+
+    boost::asio::io_context ioContext;
+    boost::asio::ip::tcp::socket socket(ioContext);
+    socket.connect(boost::asio::ip::tcp::endpoint(
+        boost::asio::ip::make_address("127.0.0.1"), port));
+    const std::array<uint8_t, 4> payload{{0xaa, 0xbb, 0xcc, 0xdd}};
+    boost::asio::write(socket, boost::asio::buffer(payload));
+
+    Expect(WaitUntil([&] {
+        std::lock_guard<std::mutex> lock(mutex);
+        return captured.has_value();
+    }, std::chrono::milliseconds(500)), "expected TCP packet callback");
+
+    recplay::Packet packet;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        packet = *captured;
+    }
+
+    Expect(packet.t_capture != 0, "captured TCP packet should set t_capture");
+    Expect(packet.t_origin != 0, "captured TCP packet should set t_origin");
+    Expect(packet.t_record != 0, "captured TCP packet should set t_record");
+
+    service.StopCapture();
+#endif
+}
+
+void TestServerCaptureAcceptsSequentialConnections() {
+#if RECPLAY_TEST_HAS_BOOST_ASIO && RECPLAY_TEST_HAS_JSON
+    TcpProtocolService service;
+    const unsigned short port = 39013;
+    const std::string config =
+        R"({"mode":"server","host":"127.0.0.1","port":39013,"channel_id":12,"channel_name":"tcp-accept","topic":"tcp/accept"})";
+
+    std::mutex mutex;
+    size_t packetCount = 0;
+    Expect(service.StartCapture(config, [&](recplay::PacketPtr) {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++packetCount;
+    }), "capture should start for sequential accept test");
+
+    auto sendPayload = [&](uint8_t firstByte) {
+        boost::asio::io_context ioContext;
+        boost::asio::ip::tcp::socket socket(ioContext);
+        socket.connect(boost::asio::ip::tcp::endpoint(
+            boost::asio::ip::make_address("127.0.0.1"), port));
+        const std::array<uint8_t, 4> payload{{firstByte, 0x02, 0x03, 0x04}};
+        boost::asio::write(socket, boost::asio::buffer(payload));
+        boost::system::error_code ec;
+        socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+        socket.close(ec);
+    };
+
+    sendPayload(0x11);
+    Expect(WaitUntil([&] {
+        std::lock_guard<std::mutex> lock(mutex);
+        return packetCount >= 1;
+    }, std::chrono::milliseconds(500)), "first TCP client should be received");
+
+    sendPayload(0x22);
+    Expect(WaitUntil([&] {
+        std::lock_guard<std::mutex> lock(mutex);
+        return packetCount >= 2;
+    }, std::chrono::milliseconds(500)), "second TCP client should also be received");
+
+    service.StopCapture();
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -117,6 +214,8 @@ int main() {
         TestCaptureLifecycleAndChannels();
         TestReplayLifecycle();
         TestCaptureAndReplayStopIndependently();
+        TestCapturedPacketsPopulateTimestamps();
+        TestServerCaptureAcceptsSequentialConnections();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

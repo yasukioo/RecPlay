@@ -17,6 +17,9 @@
 
 #include <exception>
 #include <iostream>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <stdexcept>
 #include <string>
 
@@ -28,6 +31,18 @@ void Expect(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+template <typename Predicate>
+bool WaitUntil(Predicate&& predicate, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
 }
 
 void TestSchemaIncludesUdpFields() {
@@ -110,6 +125,47 @@ void TestCaptureAndReplayStopIndependently() {
 #endif
 }
 
+void TestCapturedPacketsPopulateTimestamps() {
+#if RECPLAY_TEST_HAS_BOOST_ASIO && RECPLAY_TEST_HAS_JSON
+    UdpProtocolService service;
+    const unsigned short port = 39011;
+    const std::string config =
+        R"({"address":"127.0.0.1","interface":"127.0.0.1","port":39011,"channel_id":5,"channel_name":"udp-ts","topic":"udp/timestamps"})";
+
+    std::mutex mutex;
+    std::optional<recplay::Packet> captured;
+    Expect(service.StartCapture(config, [&](recplay::PacketPtr packet) {
+        std::lock_guard<std::mutex> lock(mutex);
+        captured = *packet;
+    }), "capture should start for timestamp test");
+
+    boost::asio::io_context ioContext;
+    boost::asio::ip::udp::socket socket(ioContext);
+    socket.open(boost::asio::ip::udp::v4());
+    const std::array<uint8_t, 4> payload{{0x10, 0x20, 0x30, 0x40}};
+    socket.send_to(
+        boost::asio::buffer(payload),
+        boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("127.0.0.1"), port));
+
+    Expect(WaitUntil([&] {
+        std::lock_guard<std::mutex> lock(mutex);
+        return captured.has_value();
+    }, std::chrono::milliseconds(500)), "expected UDP packet callback");
+
+    recplay::Packet packet;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        packet = *captured;
+    }
+
+    Expect(packet.t_capture != 0, "captured UDP packet should set t_capture");
+    Expect(packet.t_origin != 0, "captured UDP packet should set t_origin");
+    Expect(packet.t_record != 0, "captured UDP packet should set t_record");
+
+    service.StopCapture();
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -118,6 +174,7 @@ int main() {
         TestCaptureLifecycleAndChannels();
         TestReplayLifecycle();
         TestCaptureAndReplayStopIndependently();
+        TestCapturedPacketsPopulateTimestamps();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;
