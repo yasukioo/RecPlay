@@ -13,7 +13,7 @@ SessionState SessionStateMachine::GetState() const {
 bool SessionStateMachine::IsValidTransition(SessionState from, SessionState to) const {
     switch (from) {
         case SessionState::Idle:
-            return to == SessionState::Recording;
+            return to == SessionState::Recording || to == SessionState::Stopped;
         case SessionState::Recording:
             return to == SessionState::RecordingPaused || to == SessionState::Stopped;
         case SessionState::RecordingPaused:
