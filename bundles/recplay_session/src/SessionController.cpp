@@ -7,6 +7,7 @@
 #include "IStorageService.h"
 
 #include <algorithm>
+#include <cctype>
 #include <utility>
 
 #if __has_include(<nlohmann/json.hpp>)
@@ -27,14 +28,114 @@ struct RecordRequest {
     std::string protocol_config = "{}";
 };
 
-std::string ToJsonString(const nlohmann::json& value) {
-#if RECPLAY_HAS_JSON
-    return value.dump();
-#else
-    (void)value;
-    return "{}";
-#endif
+std::string TrimCopy(const std::string& value) {
+    size_t start = 0;
+    while (start < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+        ++start;
+    }
+
+    size_t end = value.size();
+    while (end > start &&
+           std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+
+    return value.substr(start, end - start);
 }
+
+size_t FindValueStart(const std::string& document, const std::string& key) {
+    const auto keyPos = document.find("\"" + key + "\"");
+    if (keyPos == std::string::npos) {
+        return std::string::npos;
+    }
+    const auto colonPos = document.find(':', keyPos);
+    if (colonPos == std::string::npos) {
+        return std::string::npos;
+    }
+    return colonPos + 1;
+}
+
+std::string ExtractJsonStringValue(const std::string& document, const std::string& key) {
+    const auto valueStart = FindValueStart(document, key);
+    if (valueStart == std::string::npos) {
+        return {};
+    }
+
+    const auto firstQuote = document.find('"', valueStart);
+    if (firstQuote == std::string::npos) {
+        return {};
+    }
+    const auto secondQuote = document.find('"', firstQuote + 1);
+    if (secondQuote == std::string::npos) {
+        return {};
+    }
+    return document.substr(firstQuote + 1, secondQuote - firstQuote - 1);
+}
+
+std::vector<std::string> ExtractJsonStringArray(const std::string& document, const std::string& key) {
+    const auto valueStart = FindValueStart(document, key);
+    if (valueStart == std::string::npos) {
+        return {};
+    }
+
+    const auto openBracket = document.find('[', valueStart);
+    if (openBracket == std::string::npos) {
+        return {};
+    }
+    const auto closeBracket = document.find(']', openBracket + 1);
+    if (closeBracket == std::string::npos) {
+        return {};
+    }
+
+    std::vector<std::string> values;
+    size_t cursor = openBracket;
+    while (true) {
+        const auto firstQuote = document.find('"', cursor + 1);
+        if (firstQuote == std::string::npos || firstQuote > closeBracket) {
+            break;
+        }
+        const auto secondQuote = document.find('"', firstQuote + 1);
+        if (secondQuote == std::string::npos || secondQuote > closeBracket) {
+            break;
+        }
+        values.push_back(document.substr(firstQuote + 1, secondQuote - firstQuote - 1));
+        cursor = secondQuote;
+    }
+    return values;
+}
+
+std::string ExtractJsonObjectLiteral(const std::string& document, const std::string& key) {
+    const auto valueStart = FindValueStart(document, key);
+    if (valueStart == std::string::npos) {
+        return {};
+    }
+
+    const auto openBrace = document.find('{', valueStart);
+    if (openBrace == std::string::npos) {
+        return {};
+    }
+
+    int depth = 0;
+    for (size_t i = openBrace; i < document.size(); ++i) {
+        if (document[i] == '{') {
+            ++depth;
+        } else if (document[i] == '}') {
+            --depth;
+            if (depth == 0) {
+                return TrimCopy(document.substr(openBrace, i - openBrace + 1));
+            }
+        }
+    }
+
+    return {};
+}
+
+#if RECPLAY_HAS_JSON
+std::string ToJsonString(const nlohmann::json& value) {
+    return value.dump();
+}
+#endif
 
 RecordRequest ParseRecordRequest(const std::string& config_json,
                                  const std::vector<std::string>& available_protocols) {
@@ -52,13 +153,27 @@ RecordRequest ParseRecordRequest(const std::string& config_json,
     }
 
     if (document.contains("protocol_config")) {
-        request.protocol_config = document.at("protocol_config").dump();
+        request.protocol_config = ToJsonString(document.at("protocol_config"));
     } else if (document.contains("protocol")) {
-        request.protocol_config = document.at("protocol").dump();
+        request.protocol_config = ToJsonString(document.at("protocol"));
     }
 #else
-    (void)config_json;
-    request.protocols = available_protocols;
+    request.output_path = ExtractJsonStringValue(config_json, "output_path");
+    request.codec = ExtractJsonStringValue(config_json, "codec");
+    if (request.codec.empty()) {
+        request.codec = "zstd";
+    }
+    request.protocols = ExtractJsonStringArray(config_json, "protocols");
+    request.protocol_config = ExtractJsonObjectLiteral(config_json, "protocol_config");
+    if (request.protocol_config.empty()) {
+        request.protocol_config = ExtractJsonObjectLiteral(config_json, "protocol");
+    }
+    if (request.protocol_config.empty()) {
+        request.protocol_config = "{}";
+    }
+    if (request.protocols.empty()) {
+        request.protocols = available_protocols;
+    }
 #endif
     return request;
 }
@@ -139,6 +254,9 @@ bool SessionController::StartRecording(const std::string& configJson) {
 }
 
 void SessionController::PauseRecording() {
+    if (machine_.GetState() != SessionState::Recording) {
+        return;
+    }
     if (!machine_.Transition(SessionState::RecordingPaused)) {
         return;
     }
@@ -148,6 +266,9 @@ void SessionController::PauseRecording() {
 }
 
 void SessionController::ResumeRecording() {
+    if (machine_.GetState() != SessionState::RecordingPaused) {
+        return;
+    }
     if (!machine_.Transition(SessionState::Recording)) {
         return;
     }
@@ -226,18 +347,14 @@ void SessionController::Play(double speed) {
     } else {
         engine_->Timeline().Start();
     }
-    engine_->Scheduler().Start([this](PacketPtr pkt) {
-        if (engine_ == nullptr || !pkt) {
-            return;
-        }
-        engine_->DispatchPacketToReplayingProtocols(pkt);
-        std::lock_guard<std::mutex> lock(mutex_);
-        current_position_ns_ = pkt->t_capture;
-    });
+    engine_->Scheduler().Start([this](PacketPtr pkt) { DispatchPlaybackPacket(std::move(pkt)); });
     machine_.Transition(SessionState::Playing);
 }
 
 void SessionController::Pause() {
+    if (machine_.GetState() != SessionState::Playing) {
+        return;
+    }
     if (engine_) {
         engine_->Timeline().Pause();
         engine_->Scheduler().Stop();
@@ -300,6 +417,17 @@ void SessionController::SetLoopRange(uint64_t startNs, uint64_t endNs) {
 }
 
 void SessionController::Stop() {
+    const auto state = machine_.GetState();
+    const bool has_active_playback =
+        engine_ != nullptr &&
+        ((engine_->Storage() != nullptr && engine_->Storage()->IsReading()) ||
+         !active_replay_protocols_.empty());
+    if (state != SessionState::Playing &&
+        state != SessionState::PlaybackPaused &&
+        state != SessionState::Seeking &&
+        !(state == SessionState::Stopped && has_active_playback)) {
+        return;
+    }
     if (engine_ != nullptr) {
         engine_->Scheduler().Stop();
         engine_->Scheduler().Clear();
@@ -307,6 +435,9 @@ void SessionController::Stop() {
         if (auto* storage = engine_->Storage(); storage != nullptr && storage->IsReading()) {
             storage->CloseFile();
         }
+    }
+    if (state == SessionState::Seeking) {
+        machine_.Transition(SessionState::PlaybackPaused);
     }
     machine_.Transition(SessionState::Stopped);
 }
@@ -370,15 +501,54 @@ bool SessionController::FillPlaybackQueue() {
     }
 
     bool queued_any = false;
-    while (storage->HasMore()) {
+    size_t queued_count = 0;
+    while (storage->HasMore() && queued_count < kPlaybackPrefetchPackets) {
         auto pkt = storage->ReadNext();
         if (!pkt) {
             break;
         }
         engine_->Scheduler().Enqueue(pkt);
         queued_any = true;
+        ++queued_count;
     }
     return queued_any || !storage->HasMore();
+}
+
+void SessionController::DispatchPlaybackPacket(PacketPtr pkt) {
+    if (engine_ == nullptr || !pkt) {
+        return;
+    }
+
+    auto* storage = engine_->Storage();
+    if (storage == nullptr || !storage->IsReading()) {
+        return;
+    }
+
+    uint64_t loop_start = 0;
+    uint64_t loop_end = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current_position_ns_ = pkt->t_capture;
+        loop_start = loop_start_ns_;
+        loop_end = loop_end_ns_;
+    }
+
+    engine_->DispatchPacketToReplayingProtocols(pkt);
+
+    if (loop_end > loop_start && pkt->t_capture >= loop_end) {
+        engine_->Scheduler().Clear();
+        if (storage->SeekTo(loop_start)) {
+            engine_->Timeline().SeekTo(loop_start);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                current_position_ns_ = loop_start;
+            }
+            FillPlaybackQueue();
+        }
+        return;
+    }
+
+    FillPlaybackQueue();
 }
 
 void SessionController::PublishState(SessionState from, SessionState next) {

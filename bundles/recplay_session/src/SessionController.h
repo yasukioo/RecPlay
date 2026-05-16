@@ -37,10 +37,13 @@ public:
     double GetCurrentSpeed() const override;
 
 private:
+    void DispatchPlaybackPacket(PacketPtr pkt);
     void StopRecordingProtocols();
     void StopReplayProtocols();
     bool FillPlaybackQueue();
     void PublishState(SessionState from, SessionState next);
+
+    static constexpr size_t kPlaybackPrefetchPackets = 3;
 
     CoreEngine* engine_ = nullptr;
     mutable std::mutex mutex_;
