@@ -5,6 +5,10 @@ out/
 cmake-build-*/
 vcpkg_installed/
 
+# Web frontend
+web/node_modules/
+web/dist/
+
 # doc
 docs/
 
