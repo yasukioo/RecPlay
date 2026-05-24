@@ -1,15 +1,24 @@
-import ReactECharts from "echarts-for-react";
+import { echarts, ReactEChartsCore } from "../../charts/echarts";
+import { getTranslations } from "../../i18n";
+import { getMonitorDashboardClasses } from "../../layoutModel";
+import { useLocaleStore } from "../../stores/localeStore";
 import { useStatsStore } from "../../stores/statsStore";
+import {
+  buildLatencyDistribution,
+  buildSecondaryTrends,
+  getRingBufferPercent,
+} from "./monitorDashboardModel";
 
 export function MonitorDashboard() {
+  const locale = useLocaleStore((s) => s.locale);
   const stats = useStatsStore((s) => s);
+  const layoutClasses = getMonitorDashboardClasses();
+  const t = getTranslations(locale);
 
-  const ringBufferPct =
-    stats.ringbuf_capacity > 0
-      ? Math.round((stats.ringbuf_used / stats.ringbuf_capacity) * 100)
-      : 0;
+  const ringBufferPct = getRingBufferPercent(stats.ringbuf_used, stats.ringbuf_capacity);
+  const latencyDistribution = buildLatencyDistribution(stats.write_latency_p99_ms);
+  const secondaryTrends = buildSecondaryTrends(stats.history, locale);
 
-  // TODO: Codex — add more chart types (gauge for ring buffer, bar for latency distribution)
   const throughputOption = {
     grid: { top: 16, bottom: 24, left: 48, right: 16 },
     xAxis: {
@@ -40,21 +49,156 @@ export function MonitorDashboard() {
     },
   };
 
+  const ringGaugeOption = {
+    series: [
+      {
+        type: "gauge",
+        startAngle: 210,
+        endAngle: -30,
+        min: 0,
+        max: 100,
+        progress: { show: true, width: 10 },
+        pointer: { show: false },
+        axisLine: { lineStyle: { width: 10, color: [[1, "#2a2f38"]] } },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: { show: false },
+        detail: {
+          valueAnimation: false,
+          formatter: "{value}%",
+          color: "#e8eaed",
+          fontSize: 18,
+          offsetCenter: [0, "10%"],
+        },
+        title: {
+          color: "#9aa0a8",
+          fontSize: 11,
+          offsetCenter: [0, "72%"],
+        },
+        data: [{ value: ringBufferPct, name: t.monitorDashboard.ringBuffer }],
+      },
+    ],
+  };
+
+  const latencyOption = {
+    grid: { top: 16, bottom: 8, left: 56, right: 16 },
+    xAxis: {
+      type: "value" as const,
+      max: 100,
+      axisLabel: { fontSize: 10, color: "#9aa0a8", formatter: "{value}%" },
+      splitLine: { lineStyle: { color: "#2a2f38" } },
+    },
+    yAxis: {
+      type: "category" as const,
+      data: latencyDistribution.map((item) => item.label),
+      axisLabel: { fontSize: 10, color: "#9aa0a8" },
+      axisTick: { show: false },
+      axisLine: { show: false },
+    },
+    series: [
+      {
+        type: "bar",
+        data: latencyDistribution.map((item) => item.value),
+        barWidth: 12,
+        itemStyle: {
+          borderRadius: 999,
+          color: (params: { dataIndex: number }) => ["#66bb6a", "#ffa726", "#ef5350"][params.dataIndex] ?? "#4fc3f7",
+        },
+        label: {
+          show: true,
+          position: "right" as const,
+          color: "#e8eaed",
+          formatter: "{c}%",
+        },
+      },
+    ],
+    tooltip: { show: false },
+  };
+
   return (
     <div className="space-y-3">
-      {/* Metric cards */}
-      <div className="grid grid-cols-3 gap-2">
-        <MetricCard label="Throughput" value={`${stats.total_throughput_mbps.toFixed(2)} Mbps`} />
-        <MetricCard label="Packets" value={stats.total_packets.toLocaleString()} />
-        <MetricCard label="Drops" value={stats.total_drops.toLocaleString()} danger={stats.total_drops > 0} />
-        <MetricCard label="P99 Latency" value={`${stats.write_latency_p99_ms.toFixed(2)} ms`} />
-        <MetricCard label="Ring Buffer" value={`${ringBufferPct}%`} danger={ringBufferPct > 80} />
-        <MetricCard label="Disk Queue" value={`${stats.disk_queue_bytes.toLocaleString()} B`} />
+      <div className={layoutClasses.metricGrid}>
+        <MetricCard label={t.monitorDashboard.throughput} value={`${stats.total_throughput_mbps.toFixed(2)} Mbps`} />
+        <MetricCard label={t.monitorDashboard.packets} value={stats.total_packets.toLocaleString()} />
+        <MetricCard
+          label={t.monitorDashboard.drops}
+          value={stats.total_drops.toLocaleString()}
+          danger={stats.total_drops > 0}
+        />
+        <MetricCard label={t.monitorDashboard.p99Latency} value={`${stats.write_latency_p99_ms.toFixed(2)} ms`} />
+        <MetricCard label={t.monitorDashboard.ringBuffer} value={`${ringBufferPct}%`} danger={ringBufferPct > 80} />
+        <MetricCard label={t.monitorDashboard.diskQueue} value={`${stats.disk_queue_bytes.toLocaleString()} B`} />
       </div>
 
-      {/* Throughput chart */}
-      <div className="bg-hmi-surface rounded border border-hmi-border p-2">
-        <ReactECharts option={throughputOption} style={{ height: "160px" }} opts={{ renderer: "svg" }} />
+      <div className={layoutClasses.chartGrid}>
+        <div className="rounded border border-hmi-border bg-hmi-surface p-2">
+          <div className="mb-2 text-xs uppercase tracking-wide text-hmi-text-muted">{t.monitorDashboard.throughput}</div>
+          <ReactEChartsCore
+            echarts={echarts}
+            option={throughputOption}
+            style={{ height: "160px" }}
+            opts={{ renderer: "svg" }}
+          />
+        </div>
+        <div className="rounded border border-hmi-border bg-hmi-surface p-2">
+          <div className="mb-2 text-xs uppercase tracking-wide text-hmi-text-muted">{t.monitorDashboard.ringBuffer}</div>
+          <ReactEChartsCore
+            echarts={echarts}
+            option={ringGaugeOption}
+            style={{ height: "160px" }}
+            opts={{ renderer: "svg" }}
+          />
+        </div>
+        <div className="rounded border border-hmi-border bg-hmi-surface p-2">
+          <div className="mb-2 text-xs uppercase tracking-wide text-hmi-text-muted">{t.monitorDashboard.latencyMix}</div>
+          <ReactEChartsCore
+            echarts={echarts}
+            option={latencyOption}
+            style={{ height: "160px" }}
+            opts={{ renderer: "svg" }}
+          />
+        </div>
+      </div>
+
+      <div className={layoutClasses.trendGrid}>
+        {secondaryTrends.map((trend) => {
+          const option = {
+            grid: { top: 8, bottom: 8, left: 8, right: 8 },
+            xAxis: {
+              type: "category" as const,
+              data: trend.data.map((_, index) => index),
+              show: false,
+            },
+            yAxis: {
+              type: "value" as const,
+              show: false,
+            },
+            series: [
+              {
+                type: "line",
+                data: trend.data,
+                smooth: true,
+                symbol: "none",
+                areaStyle: { color: `${trend.color}22` },
+                lineStyle: { color: trend.color, width: 1.8 },
+              },
+            ],
+            tooltip: { show: false },
+          };
+
+          return (
+            <div key={trend.label} className="rounded border border-hmi-border bg-hmi-surface p-2">
+              <div className="text-xs uppercase tracking-wide text-hmi-text-muted">{trend.label}</div>
+              <div className="mt-1 font-mono text-base font-bold text-hmi-text">{trend.value}</div>
+              <ReactEChartsCore
+                echarts={echarts}
+                option={option}
+                style={{ height: "72px" }}
+                opts={{ renderer: "svg" }}
+              />
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -62,11 +206,13 @@ export function MonitorDashboard() {
 
 function MetricCard({ label, value, danger }: { label: string; value: string; danger?: boolean }) {
   return (
-    <div className={`p-3 rounded border ${
-      danger ? "border-hmi-danger/30 bg-hmi-danger/5" : "border-hmi-border bg-hmi-surface"
-    }`}>
+    <div
+      className={`rounded border p-3 ${
+        danger ? "border-hmi-danger/30 bg-hmi-danger/5" : "border-hmi-border bg-hmi-surface"
+      }`}
+    >
       <div className="text-xs text-hmi-text-muted">{label}</div>
-      <div className="text-lg font-bold font-mono mt-1">{value}</div>
+      <div className="mt-1 font-mono text-lg font-bold">{value}</div>
     </div>
   );
 }

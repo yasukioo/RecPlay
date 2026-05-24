@@ -2,11 +2,15 @@
 // Author: yasukioo <yasukioo@outlook.com>
 
 #include "HttpServer.h"
+#include "IRuntimeCatalog.h"
 #include "ISessionService.h"
 #include "IStatsService.h"
+#include "WebRootLocator.h"
 
 #include <cstddef>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -16,10 +20,16 @@ namespace {
 
 using recplay::HttpServer;
 using recplay::IStatsService;
+using recplay::IRuntimeCatalog;
 using recplay::ISessionService;
+using recplay::PluginConfigFieldInfo;
+using recplay::PluginRuntimeInfo;
+using recplay::RuntimeChannelInfo;
+using recplay::RuntimeTopicMapping;
 using recplay::SessionState;
 using recplay::StateCallback;
 using recplay::StatsSnapshot;
+using recplay::ResolveWebRoot;
 
 void Expect(bool condition, const std::string& message) {
     if (!condition) {
@@ -106,6 +116,60 @@ public:
     StatsSnapshot snapshot;
 };
 
+class FakeRuntimeCatalog final : public IRuntimeCatalog {
+public:
+    std::vector<PluginRuntimeInfo> ListPlugins() const override { return plugins; }
+
+    std::optional<PluginRuntimeInfo> GetPlugin(const std::string& id) const override {
+        for (const auto& plugin : plugins) {
+            if (plugin.id == id) {
+                return plugin;
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool SavePluginConfig(const std::string& id,
+                          const std::vector<PluginConfigFieldInfo>& fields) override {
+        saved_plugin_id = id;
+        saved_fields = fields;
+        return save_plugin_config_result;
+    }
+
+    bool StartPlugin(const std::string& id) override {
+        started_plugin_id = id;
+        return start_plugin_result;
+    }
+
+    bool StopPlugin(const std::string& id) override {
+        stopped_plugin_id = id;
+        return stop_plugin_result;
+    }
+
+    std::vector<RuntimeChannelInfo> ListChannels() const override { return channels; }
+
+    std::vector<RuntimeTopicMapping> GetTopicMappings() const override { return mappings; }
+
+    bool SetTopicMappings(const std::vector<RuntimeTopicMapping>& nextMappings) override {
+        set_mappings_called = true;
+        mappings = nextMappings;
+        return set_topic_mappings_result;
+    }
+
+    std::vector<PluginRuntimeInfo> plugins;
+    std::vector<RuntimeChannelInfo> channels;
+    std::vector<RuntimeTopicMapping> mappings;
+    std::string saved_plugin_id;
+    std::vector<PluginConfigFieldInfo> saved_fields;
+    std::string started_plugin_id;
+    std::string stopped_plugin_id;
+    bool save_plugin_config_result = true;
+    bool start_plugin_result = true;
+    bool stop_plugin_result = true;
+    bool set_topic_mappings_result = true;
+    bool set_mappings_called = false;
+};
+
 void TestSessionStateResponse() {
     FakeSessionService session;
     FakeStatsService stats;
@@ -130,6 +194,7 @@ void TestStatsSnapshotResponse() {
     stats.snapshot.ringbuf_used = 7;
     stats.snapshot.ringbuf_capacity = 64;
     stats.snapshot.disk_queue_bytes = 8192;
+    stats.snapshot.cpu_usage_percent = 37.5;
     HttpServer server(&session, &stats);
 
     const auto response = server.HandleRequest("GET", "/api/stats", "");
@@ -140,12 +205,185 @@ void TestStatsSnapshotResponse() {
     Expect(response.body.find("\"write_latency_p99_ms\":4.75") != std::string::npos, "body should include p99");
     Expect(response.body.find("\"ringbuf_used\":7") != std::string::npos, "body should include ring buffer");
     Expect(response.body.find("\"disk_queue_bytes\":8192") != std::string::npos, "body should include disk queue");
+    Expect(response.body.find("\"cpu_usage_percent\":37.5") != std::string::npos,
+           "body should include actual cpu usage percent");
+}
+
+void TestRuntimeRoutes() {
+    FakeSessionService session;
+    FakeStatsService stats;
+    FakeRuntimeCatalog runtime;
+    runtime.plugins = {
+        PluginRuntimeInfo{
+            "UDP",
+            "UDP Protocol",
+            "1.0.0",
+            "inactive",
+            "bundles/protocol_udp.dll",
+            {
+                PluginConfigFieldInfo{"address", "Address", "239.1.1.1"},
+                PluginConfigFieldInfo{"port", "Port", "5000"},
+            },
+        },
+    };
+    runtime.channels = {
+        RuntimeChannelInfo{"UDP:7", "/in/radar", "input", "UDP", "UDP"},
+        RuntimeChannelInfo{"TCP:8", "/out/radar", "output", "TCP", "TCP"},
+    };
+    runtime.mappings = {
+        RuntimeTopicMapping{"/in/radar", "/out/radar"},
+    };
+
+    HttpServer server(&session, &stats);
+    server.SetRuntimeCatalog(&runtime);
+
+    auto response = server.HandleRequest("GET", "/api/plugins", "");
+    Expect(response.status_code == 200, "plugins route should return 200");
+    Expect(response.body.find("\"id\":\"UDP\"") != std::string::npos,
+           "plugins route should include plugin identifier");
+    Expect(response.body.find("\"bundle_path\":\"bundles/protocol_udp.dll\"") != std::string::npos,
+           "plugins route should include bundle path");
+
+    response = server.HandleRequest("GET", "/api/plugins/UDP", "");
+    Expect(response.status_code == 200, "plugin detail route should return 200");
+    Expect(response.body.find("\"config_fields\"") != std::string::npos,
+           "plugin detail route should include config fields");
+
+    response = server.HandleRequest(
+        "POST",
+        "/api/plugins/UDP/config",
+        R"({"config_fields":[{"key":"address","label":"Address","value":"239.9.9.9"},{"key":"port","label":"Port","value":"5500"}]})");
+    Expect(response.status_code == 200, "plugin config route should return 200");
+    Expect(runtime.saved_plugin_id == "UDP", "plugin config route should save the targeted plugin id");
+    Expect(runtime.saved_fields.size() == 2, "plugin config route should persist runtime fields");
+    Expect(runtime.saved_fields[0].value == "239.9.9.9",
+           "plugin config route should forward updated values");
+
+    response = server.HandleRequest("POST", "/api/plugins/UDP/start", "");
+    Expect(response.status_code == 200, "plugin start route should return 200");
+    Expect(runtime.started_plugin_id == "UDP", "plugin start route should target the selected plugin");
+
+    response = server.HandleRequest("POST", "/api/plugins/UDP/stop", "");
+    Expect(response.status_code == 200, "plugin stop route should return 200");
+    Expect(runtime.stopped_plugin_id == "UDP", "plugin stop route should target the selected plugin");
+
+    response = server.HandleRequest("GET", "/api/channels", "");
+    Expect(response.status_code == 200, "channels route should return 200");
+    Expect(response.body.find("\"direction\":\"output\"") != std::string::npos,
+           "channels route should include channel directions");
+
+    response = server.HandleRequest("GET", "/api/mappings", "");
+    Expect(response.status_code == 200, "mappings route should return 200");
+    Expect(response.body.find("\"source_topic\":\"/in/radar\"") != std::string::npos,
+           "mappings route should include source topic");
+
+    response = server.HandleRequest(
+        "POST",
+        "/api/mappings",
+        R"({"mappings":[{"source_topic":"/in/camera","target_topic":"/out/camera"}]})");
+    Expect(response.status_code == 200, "set mappings route should return 200");
+    Expect(runtime.set_mappings_called, "set mappings route should invoke runtime catalog");
+    Expect(runtime.mappings.size() == 1, "set mappings route should replace mappings");
+    Expect(runtime.mappings[0].target_topic == "/out/camera",
+           "set mappings route should forward target topic");
+}
+
+void TestRuntimeRoutesRequireRuntimeCatalog() {
+    FakeSessionService session;
+    FakeStatsService stats;
+    HttpServer server(&session, &stats);
+
+    auto response = server.HandleRequest("GET", "/api/plugins", "");
+    Expect(response.status_code == 503, "plugins route should return 503 without runtime catalog");
+
+    response = server.HandleRequest("GET", "/api/channels", "");
+    Expect(response.status_code == 503, "channels route should return 503 without runtime catalog");
+
+    response = server.HandleRequest("GET", "/api/mappings", "");
+    Expect(response.status_code == 503, "mappings route should return 503 without runtime catalog");
 }
 
 void TestUnknownRouteResponse() {
     HttpServer server(nullptr, nullptr);
     const auto response = server.HandleRequest("GET", "/api/unknown", "");
     Expect(response.status_code == 404, "unknown route should return 404");
+}
+
+void TestStaticFileRoutes() {
+    const auto tempRoot =
+        std::filesystem::temp_directory_path() / "recplay_http_server_static_test";
+    std::filesystem::remove_all(tempRoot);
+    std::filesystem::create_directories(tempRoot / "assets");
+
+    {
+        std::ofstream indexFile(tempRoot / "index.html", std::ios::binary);
+        indexFile << "<!doctype html><html><body>RecPlay</body></html>";
+    }
+    {
+        std::ofstream assetFile(tempRoot / "assets" / "app.js", std::ios::binary);
+        assetFile << "console.log('recplay');";
+    }
+
+    HttpServer server(nullptr, nullptr);
+    Expect(server.SetStaticRoot(tempRoot.string()), "static root should be accepted");
+
+    auto response = server.HandleRequest("GET", "/", "");
+    Expect(response.status_code == 200, "root path should serve index.html");
+    Expect(response.content_type == "text/html", "index should use html content type");
+    Expect(response.body.find("RecPlay") != std::string::npos, "index body should be served");
+
+    response = server.HandleRequest("GET", "/assets/app.js", "");
+    Expect(response.status_code == 200, "asset path should serve file");
+    Expect(response.content_type == "application/javascript",
+           "js asset should use javascript content type");
+    Expect(response.body.find("console.log") != std::string::npos, "asset body should be served");
+
+    response = server.HandleRequest("GET", "/dashboard", "");
+    Expect(response.status_code == 200, "spa route should fall back to index.html");
+    Expect(response.content_type == "text/html", "spa route should use html content type");
+
+    response = server.HandleRequest("GET", "/assets/missing.js", "");
+    Expect(response.status_code == 404, "missing asset should return 404");
+
+    std::filesystem::remove_all(tempRoot);
+}
+
+void TestWebRootResolution() {
+    const auto tempRoot =
+        std::filesystem::temp_directory_path() / "recplay_web_root_locator_test";
+    std::filesystem::remove_all(tempRoot);
+    std::filesystem::create_directories(tempRoot / "build" / "web");
+    std::filesystem::create_directories(tempRoot / "source" / "web" / "dist");
+
+    {
+        std::ofstream buildIndex(tempRoot / "build" / "web" / "index.html", std::ios::binary);
+        buildIndex << "build";
+    }
+    {
+        std::ofstream sourceIndex(tempRoot / "source" / "web" / "dist" / "index.html", std::ios::binary);
+        sourceIndex << "source";
+    }
+
+    const auto fromBuild = ResolveWebRoot(
+        (tempRoot / "build" / "Debug").string(),
+        (tempRoot / "source").string());
+    Expect(fromBuild == std::filesystem::weakly_canonical(tempRoot / "build" / "web").string(),
+           "resolver should prefer build web output");
+
+    const auto fromBuildRoot = ResolveWebRoot(
+        (tempRoot / "build").string(),
+        (tempRoot / "source").string());
+    Expect(fromBuildRoot == std::filesystem::weakly_canonical(tempRoot / "build" / "web").string(),
+           "resolver should accept build root directly");
+
+    std::filesystem::remove(tempRoot / "build" / "web" / "index.html");
+    const auto fromSource = ResolveWebRoot(
+        (tempRoot / "build" / "Debug").string(),
+        (tempRoot / "source").string());
+    Expect(fromSource == std::filesystem::weakly_canonical(tempRoot / "source" / "web" / "dist").string(),
+           "resolver should fall back to source web dist");
+
+    std::filesystem::remove_all(tempRoot);
 }
 
 void TestUnavailableServicesReturn503() {
@@ -449,7 +687,11 @@ int main() {
     try {
         TestSessionStateResponse();
         TestStatsSnapshotResponse();
+        TestRuntimeRoutes();
+        TestRuntimeRoutesRequireRuntimeCatalog();
         TestUnknownRouteResponse();
+        TestStaticFileRoutes();
+        TestWebRootResolution();
         TestUnavailableServicesReturn503();
         TestPlaybackCommandRoutes();
         TestPlaybackValidationErrors();

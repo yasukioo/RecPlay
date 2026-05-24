@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "StaticFileHandler.h"
+
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -12,6 +14,7 @@ namespace recplay {
 
 class ISessionService;
 class IStatsService;
+class IRuntimeCatalog;
 
 struct HttpResponse {
     int status_code = 200;
@@ -21,13 +24,17 @@ struct HttpResponse {
 
 class HttpServer {
 public:
-    HttpServer(ISessionService* session = nullptr, IStatsService* stats = nullptr);
+    HttpServer(ISessionService* session = nullptr,
+               IStatsService* stats = nullptr,
+               IRuntimeCatalog* runtimeCatalog = nullptr);
 
     bool Start(const std::string& host, int port);
     void Stop();
     bool IsRunning() const;
     void SetSessionService(ISessionService* session);
     void SetStatsService(IStatsService* stats);
+    void SetRuntimeCatalog(IRuntimeCatalog* runtimeCatalog);
+    bool SetStaticRoot(const std::string& root);
     HttpResponse HandleRequest(const std::string& method,
                                const std::string& path,
                                const std::string& body) const;
@@ -46,6 +53,14 @@ private:
     HttpResponse HandlePlaybackSpeed(const std::string& body) const;
     HttpResponse HandlePlaybackLoop(const std::string& body) const;
     HttpResponse HandlePlaybackStop() const;
+    HttpResponse HandlePlugins() const;
+    HttpResponse HandlePluginDetail(const std::string& pluginId) const;
+    HttpResponse HandlePluginConfig(const std::string& pluginId, const std::string& body) const;
+    HttpResponse HandlePluginStart(const std::string& pluginId) const;
+    HttpResponse HandlePluginStop(const std::string& pluginId) const;
+    HttpResponse HandleChannels() const;
+    HttpResponse HandleMappings() const;
+    HttpResponse HandleSetMappings(const std::string& body) const;
     static HttpResponse MakeJsonResponse(std::string body, int statusCode = 200);
     static HttpResponse MakeErrorResponse(int statusCode, const std::string& message);
     static std::string EscapeJsonString(const std::string& value);
@@ -53,10 +68,13 @@ private:
     static std::string ExtractJsonStringLiteral(const std::string& body, const std::string& key);
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> restart_blocked_{false};
     bool drogon_configured_ = false;
     std::thread server_thread_;
     std::atomic<ISessionService*> session_{nullptr};
     std::atomic<IStatsService*> stats_{nullptr};
+    std::atomic<IRuntimeCatalog*> runtime_catalog_{nullptr};
+    StaticFileHandler static_files_;
 };
 
 } // namespace recplay

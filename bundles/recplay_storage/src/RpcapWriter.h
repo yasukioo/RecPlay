@@ -17,6 +17,7 @@ namespace recplay {
 class ICodecService;
 class RpcapWriter final {
 public:
+    void SetCodecService(ICodecService* codec);
     bool Create(const std::string& path,
                 const std::vector<ChannelInfo>& channels,
                 const std::string& codec);
@@ -45,6 +46,7 @@ private:
     uint64_t first_packet_ts_ = 0;
     uint64_t last_packet_ts_ = 0;
     uint64_t packets_written_ = 0;
+    ICodecService* codec_service_ = nullptr;
 };
 
 } // namespace recplay

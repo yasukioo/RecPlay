@@ -2,8 +2,10 @@
 build/
 build-*/
 out/
+.vcpkg/
 cmake-build-*/
 vcpkg_installed/
+.vcpkg/
 
 # Web frontend
 web/node_modules/

@@ -16,7 +16,8 @@
           "value": "D:/yasukioo/github/RecPlay/out/build/x64-Debug/vcpkg_installed/x64-windows/share/cppmicroservices/cmake",
           "type": "PATH"
         }
-      ]
+      ],
+      "cmakeToolchain": "D:/vcpkg/scripts/buildsystems/vcpkg.cmake"
     }
   ]
 }

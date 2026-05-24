@@ -22,9 +22,9 @@ bool FilterMappingEngine::LoadMapping(const std::string& jsonPath) {
     input >> document;
 
     const auto& mappings_json = document.is_array() ? document : document.at("mappings");
-    std::map<uint32_t, Mapping> parsed_mappings;
+    std::map<uint32_t, MappingRule> parsed_mappings;
     for (const auto& item : mappings_json) {
-        Mapping mapping;
+        MappingRule mapping;
         mapping.source_channel = item.at("source_channel").get<uint32_t>();
         mapping.target_channel = item.at("target_channel").get<uint32_t>();
         mapping.target_topic = item.value("target_topic", std::string{});
@@ -40,12 +40,22 @@ bool FilterMappingEngine::LoadMapping(const std::string& jsonPath) {
 #endif
 }
 
+void FilterMappingEngine::SetMappings(std::vector<MappingRule> mappings) {
+    std::map<uint32_t, MappingRule> parsedMappings;
+    for (auto& mapping : mappings) {
+        parsedMappings[mapping.source_channel] = std::move(mapping);
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    mappings_ = std::move(parsedMappings);
+}
+
 PacketPtr FilterMappingEngine::ApplyMapping(PacketPtr pkt) const {
     if (!pkt) {
         return nullptr;
     }
 
-    Mapping mapping;
+    MappingRule mapping;
     bool has_mapping = false;
     std::set<uint32_t> enabled_channels;
     {

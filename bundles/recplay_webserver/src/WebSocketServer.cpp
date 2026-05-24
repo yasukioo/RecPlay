@@ -71,14 +71,6 @@ void WebSocketServer::SetStatsService(IStatsService* stats) {
     }
 }
 
-void WebSocketServer::Broadcast(const std::string& message) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_) {
-        return;
-    }
-    broadcast_messages_.push_back(message);
-}
-
 std::vector<std::string> WebSocketServer::GetBroadcastMessages() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return broadcast_messages_;
@@ -87,6 +79,11 @@ std::vector<std::string> WebSocketServer::GetBroadcastMessages() const {
 void WebSocketServer::ClearBroadcastMessages() {
     std::lock_guard<std::mutex> lock(mutex_);
     broadcast_messages_.clear();
+}
+
+void WebSocketServer::SetTransport(std::function<void(std::string_view)> transport) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    transport_ = std::move(transport);
 }
 
 void WebSocketServer::BindSubscriptions() {
@@ -116,7 +113,13 @@ void WebSocketServer::HandleStatsUpdate(const StatsSnapshot& snapshot) {
            << ",\"data\":{\"total_packets\":" << snapshot.total_packets
            << ",\"total_drops\":" << snapshot.total_drops
            << ",\"total_throughput_mbps\":" << snapshot.total_throughput_mbps
-           << "}}";
+           << ",\"cpu_usage_percent\":";
+    if (snapshot.cpu_usage_percent.has_value()) {
+        stream << *snapshot.cpu_usage_percent;
+    } else {
+        stream << "null";
+    }
+    stream << "}}";
     Broadcast(stream.str());
 }
 
@@ -127,6 +130,21 @@ void WebSocketServer::HandleStateChanged(SessionState oldState, SessionState new
            << "\",\"new_state\":\"" << SessionStateToString(newState)
            << "\"}}";
     Broadcast(stream.str());
+}
+
+void WebSocketServer::Broadcast(const std::string& message) {
+    std::function<void(std::string_view)> transport;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!running_) {
+            return;
+        }
+        broadcast_messages_.push_back(message);
+        transport = transport_;
+    }
+    if (transport) {
+        transport(message);
+    }
 }
 
 } // namespace recplay

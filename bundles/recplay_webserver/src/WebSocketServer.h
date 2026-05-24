@@ -6,7 +6,9 @@
 #include "Packet.h"
 
 #include <atomic>
+#include <functional>
 #include <mutex>
+#include <string_view>
 #include <string>
 #include <vector>
 
@@ -27,6 +29,7 @@ public:
     void Broadcast(const std::string& message);
     std::vector<std::string> GetBroadcastMessages() const;
     void ClearBroadcastMessages();
+    void SetTransport(std::function<void(std::string_view)> transport);
 
 private:
     void BindSubscriptions();
@@ -40,6 +43,7 @@ private:
     ISessionService* session_ = nullptr;
     IStatsService* stats_ = nullptr;
     std::vector<std::string> broadcast_messages_;
+    std::function<void(std::string_view)> transport_;
 };
 
 } // namespace recplay

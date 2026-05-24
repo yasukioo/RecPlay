@@ -3,8 +3,10 @@
 
 #include "HttpServer.h"
 
+#include "IRuntimeCatalog.h"
 #include "IStatsService.h"
 #include "ISessionService.h"
+#include "StaticFileHandler.h"
 
 #include <cstdint>
 
@@ -25,6 +27,13 @@ static inline std::uint64_t recplay_htonll(std::uint64_t value) {
 #define RECPLAY_HAS_DROGON 1
 #else
 #define RECPLAY_HAS_DROGON 0
+#endif
+
+#if __has_include(<nlohmann/json.hpp>)
+#include <nlohmann/json.hpp>
+#define RECPLAY_HTTP_SERVER_HAS_JSON 1
+#else
+#define RECPLAY_HTTP_SERVER_HAS_JSON 0
 #endif
 
 #include <cctype>
@@ -198,6 +207,19 @@ bool TryParseUint64(const std::string& value, uint64_t* parsedValue) {
 }
 
 #if RECPLAY_HAS_DROGON
+std::string RequestMethodToString(drogon::HttpMethod method) {
+    switch (method) {
+        case drogon::Get:
+            return "GET";
+        case drogon::Post:
+            return "POST";
+        default:
+            return {};
+    }
+}
+#endif
+
+#if RECPLAY_HAS_DROGON
 drogon::HttpStatusCode ToDrogonStatus(int statusCode) {
     return static_cast<drogon::HttpStatusCode>(statusCode);
 }
@@ -215,8 +237,10 @@ drogon::HttpMethod ToDrogonMethod(const std::string& method) {
 
 } // namespace
 
-HttpServer::HttpServer(ISessionService* session, IStatsService* stats)
-    : session_(session), stats_(stats) {}
+HttpServer::HttpServer(ISessionService* session,
+                       IStatsService* stats,
+                       IRuntimeCatalog* runtimeCatalog)
+    : session_(session), stats_(stats), runtime_catalog_(runtimeCatalog) {}
 
 bool HttpServer::Start(const std::string& host, int port) {
     if (running_.exchange(true)) {
@@ -267,6 +291,40 @@ bool HttpServer::Start(const std::string& host, int port) {
         registerRoute("POST", "/api/session/playback/speed");
         registerRoute("POST", "/api/session/playback/loop");
         registerRoute("POST", "/api/session/playback/stop");
+        registerRoute("GET", "/api/plugins");
+        registerRoute("GET", "/api/channels");
+        registerRoute("GET", "/api/mappings");
+        registerRoute("POST", "/api/mappings");
+
+        drogon::app().registerHandler(
+            "/api/plugins/{path:.*}",
+            [this](const drogon::HttpRequestPtr& request,
+                   std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+                const auto response = HandleRequest(
+                    RequestMethodToString(request->method()),
+                    request->path(),
+                    std::string(request->getBody()));
+                auto httpResponse = drogon::HttpResponse::newHttpResponse();
+                httpResponse->setStatusCode(ToDrogonStatus(response.status_code));
+                httpResponse->setContentTypeString(response.content_type);
+                httpResponse->setBody(response.body);
+                callback(httpResponse);
+            },
+            {drogon::Get, drogon::Post});
+
+        drogon::app().registerHandler(
+            "/{path:.*}",
+            [this](const drogon::HttpRequestPtr& request,
+                   std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+                const auto response =
+                    HandleRequest("GET", request->path(), std::string(request->getBody()));
+                auto httpResponse = drogon::HttpResponse::newHttpResponse();
+                httpResponse->setStatusCode(ToDrogonStatus(response.status_code));
+                httpResponse->setContentTypeString(response.content_type);
+                httpResponse->setBody(response.body);
+                callback(httpResponse);
+            },
+            {drogon::Get});
         drogon_configured_ = true;
     }
 
@@ -306,6 +364,14 @@ void HttpServer::SetSessionService(ISessionService* session) {
 
 void HttpServer::SetStatsService(IStatsService* stats) {
     stats_.store(stats, std::memory_order_release);
+}
+
+void HttpServer::SetRuntimeCatalog(IRuntimeCatalog* runtimeCatalog) {
+    runtime_catalog_.store(runtimeCatalog, std::memory_order_release);
+}
+
+bool HttpServer::SetStaticRoot(const std::string& root) {
+    return static_files_.SetRoot(root);
 }
 
 HttpResponse HttpServer::HandleRequest(const std::string& method,
@@ -350,6 +416,49 @@ HttpResponse HttpServer::HandleRequest(const std::string& method,
     if (method == "POST" && path == "/api/session/playback/stop") {
         return HandlePlaybackStop();
     }
+    if (method == "GET" && path == "/api/plugins") {
+        return HandlePlugins();
+    }
+    if (method == "GET" && path == "/api/channels") {
+        return HandleChannels();
+    }
+    if (method == "GET" && path == "/api/mappings") {
+        return HandleMappings();
+    }
+    if (method == "POST" && path == "/api/mappings") {
+        return HandleSetMappings(body);
+    }
+    if (path.rfind("/api/plugins/", 0) == 0) {
+        const std::string pluginPath = path.substr(std::string("/api/plugins/").size());
+        const auto separator = pluginPath.find('/');
+        const std::string pluginId = separator == std::string::npos
+            ? pluginPath
+            : pluginPath.substr(0, separator);
+        const std::string action = separator == std::string::npos
+            ? std::string{}
+            : pluginPath.substr(separator + 1);
+
+        if (pluginId.empty()) {
+            return MakeErrorResponse(404, "Not Found");
+        }
+        if (method == "GET" && action.empty()) {
+            return HandlePluginDetail(pluginId);
+        }
+        if (method == "POST" && action == "config") {
+            return HandlePluginConfig(pluginId, body);
+        }
+        if (method == "POST" && action == "start") {
+            return HandlePluginStart(pluginId);
+        }
+        if (method == "POST" && action == "stop") {
+            return HandlePluginStop(pluginId);
+        }
+    }
+
+    if (method == "GET" && path.rfind("/api/", 0) != 0) {
+        return static_files_.Handle(path);
+    }
+
     return MakeErrorResponse(404, "Not Found");
 }
 
@@ -384,7 +493,13 @@ HttpResponse HttpServer::HandleStats() const {
            << ",\"ringbuf_used\":" << snapshot.ringbuf_used
            << ",\"ringbuf_capacity\":" << snapshot.ringbuf_capacity
            << ",\"disk_queue_bytes\":" << snapshot.disk_queue_bytes
-           << "}";
+           << ",\"cpu_usage_percent\":";
+    if (snapshot.cpu_usage_percent.has_value()) {
+        stream << *snapshot.cpu_usage_percent;
+    } else {
+        stream << "null";
+    }
+    stream << "}";
     return MakeJsonResponse(stream.str());
 }
 
@@ -552,6 +667,201 @@ HttpResponse HttpServer::HandlePlaybackStop() const {
     }
     session->Stop();
     return MakeJsonResponse("{\"ok\":true}");
+}
+
+HttpResponse HttpServer::HandlePlugins() const {
+    auto* runtimeCatalog = runtime_catalog_.load(std::memory_order_acquire);
+    if (runtimeCatalog == nullptr) {
+        return MakeErrorResponse(503, "Runtime catalog unavailable");
+    }
+
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    nlohmann::json response = nlohmann::json::array();
+    for (const auto& plugin : runtimeCatalog->ListPlugins()) {
+        nlohmann::json pluginJson = {
+            {"id", plugin.id},
+            {"name", plugin.name},
+            {"version", plugin.version},
+            {"state", plugin.state},
+            {"bundle_path", plugin.bundle_path},
+            {"config_fields", nlohmann::json::array()},
+        };
+        for (const auto& field : plugin.config_fields) {
+            pluginJson["config_fields"].push_back({
+                {"key", field.key},
+                {"label", field.label},
+                {"value", field.value},
+            });
+        }
+        response.push_back(std::move(pluginJson));
+    }
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandlePluginDetail(const std::string& pluginId) const {
+    auto* runtimeCatalog = runtime_catalog_.load(std::memory_order_acquire);
+    if (runtimeCatalog == nullptr) {
+        return MakeErrorResponse(503, "Runtime catalog unavailable");
+    }
+
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    (void)pluginId;
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    const auto plugin = runtimeCatalog->GetPlugin(pluginId);
+    if (!plugin.has_value()) {
+        return MakeErrorResponse(404, "Plugin not found");
+    }
+
+    nlohmann::json response = {
+        {"id", plugin->id},
+        {"name", plugin->name},
+        {"version", plugin->version},
+        {"state", plugin->state},
+        {"bundle_path", plugin->bundle_path},
+        {"config_fields", nlohmann::json::array()},
+    };
+    for (const auto& field : plugin->config_fields) {
+        response["config_fields"].push_back({
+            {"key", field.key},
+            {"label", field.label},
+            {"value", field.value},
+        });
+    }
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandlePluginConfig(const std::string& pluginId, const std::string& body) const {
+    auto* runtimeCatalog = runtime_catalog_.load(std::memory_order_acquire);
+    if (runtimeCatalog == nullptr) {
+        return MakeErrorResponse(503, "Runtime catalog unavailable");
+    }
+
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    (void)pluginId;
+    (void)body;
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    try {
+        const auto document = nlohmann::json::parse(body.empty() ? "{}" : body);
+        const auto fieldsJson = document.value("config_fields", nlohmann::json::array());
+        std::vector<PluginConfigFieldInfo> fields;
+        for (const auto& item : fieldsJson) {
+            fields.push_back(PluginConfigFieldInfo{
+                item.value("key", std::string{}),
+                item.value("label", std::string{}),
+                item.value("value", std::string{}),
+            });
+        }
+
+        if (!runtimeCatalog->SavePluginConfig(pluginId, fields)) {
+            return MakeErrorResponse(404, "Plugin not found");
+        }
+        return HandlePluginDetail(pluginId);
+    } catch (...) {
+        return MakeErrorResponse(400, "Invalid plugin config payload");
+    }
+#endif
+}
+
+HttpResponse HttpServer::HandlePluginStart(const std::string& pluginId) const {
+    auto* runtimeCatalog = runtime_catalog_.load(std::memory_order_acquire);
+    if (runtimeCatalog == nullptr) {
+        return MakeErrorResponse(503, "Runtime catalog unavailable");
+    }
+    if (!runtimeCatalog->StartPlugin(pluginId)) {
+        return MakeErrorResponse(400, "Failed to start plugin");
+    }
+    return HandlePluginDetail(pluginId);
+}
+
+HttpResponse HttpServer::HandlePluginStop(const std::string& pluginId) const {
+    auto* runtimeCatalog = runtime_catalog_.load(std::memory_order_acquire);
+    if (runtimeCatalog == nullptr) {
+        return MakeErrorResponse(503, "Runtime catalog unavailable");
+    }
+    if (!runtimeCatalog->StopPlugin(pluginId)) {
+        return MakeErrorResponse(400, "Failed to stop plugin");
+    }
+    return HandlePluginDetail(pluginId);
+}
+
+HttpResponse HttpServer::HandleChannels() const {
+    auto* runtimeCatalog = runtime_catalog_.load(std::memory_order_acquire);
+    if (runtimeCatalog == nullptr) {
+        return MakeErrorResponse(503, "Runtime catalog unavailable");
+    }
+
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    nlohmann::json response = nlohmann::json::array();
+    for (const auto& channel : runtimeCatalog->ListChannels()) {
+        response.push_back({
+            {"id", channel.id},
+            {"topic", channel.topic},
+            {"direction", channel.direction},
+            {"protocol", channel.protocol},
+            {"plugin_id", channel.plugin_id},
+        });
+    }
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandleMappings() const {
+    auto* runtimeCatalog = runtime_catalog_.load(std::memory_order_acquire);
+    if (runtimeCatalog == nullptr) {
+        return MakeErrorResponse(503, "Runtime catalog unavailable");
+    }
+
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    nlohmann::json response = nlohmann::json::array();
+    for (const auto& mapping : runtimeCatalog->GetTopicMappings()) {
+        response.push_back({
+            {"source_topic", mapping.source_topic},
+            {"target_topic", mapping.target_topic},
+        });
+    }
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandleSetMappings(const std::string& body) const {
+    auto* runtimeCatalog = runtime_catalog_.load(std::memory_order_acquire);
+    if (runtimeCatalog == nullptr) {
+        return MakeErrorResponse(503, "Runtime catalog unavailable");
+    }
+
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    (void)body;
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    try {
+        const auto document = nlohmann::json::parse(body.empty() ? "{}" : body);
+        const auto mappingsJson = document.value("mappings", nlohmann::json::array());
+        std::vector<RuntimeTopicMapping> mappings;
+        for (const auto& item : mappingsJson) {
+            mappings.push_back(RuntimeTopicMapping{
+                item.value("source_topic", std::string{}),
+                item.value("target_topic", std::string{}),
+            });
+        }
+
+        if (!runtimeCatalog->SetTopicMappings(mappings)) {
+            return MakeErrorResponse(400, "Failed to save topic mappings");
+        }
+        return MakeJsonResponse("{\"ok\":true}");
+    } catch (...) {
+        return MakeErrorResponse(400, "Invalid topic mapping payload");
+    }
+#endif
 }
 
 HttpResponse HttpServer::MakeJsonResponse(std::string body, int statusCode) {

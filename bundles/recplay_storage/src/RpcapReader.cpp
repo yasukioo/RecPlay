@@ -3,8 +3,10 @@
 
 #include "RpcapReader.h"
 
+#include "ICodecService.h"
 #include "IoBackendFactory.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -57,7 +59,21 @@ bool ReadBytes(IoBackend* backend, std::vector<uint8_t>& value) {
     return read == static_cast<IoSize>(size);
 }
 
+std::string GetCodecName(const recplay::RpcapHeader& header) {
+    const auto* begin = header.codec;
+    const auto* end = std::find(begin, begin + sizeof(header.codec), '\0');
+    return std::string(begin, end);
+}
+
+bool IsCompressedChunkFormat(const recplay::RpcapHeader& header) {
+    return header.version >= 2 && !GetCodecName(header).empty();
+}
+
 } // namespace
+
+void RpcapReader::SetCodecService(ICodecService* codec) {
+    codec_service_ = codec;
+}
 
 bool RpcapReader::Open(const std::string& path) {
     Close();
@@ -74,6 +90,12 @@ bool RpcapReader::Open(const std::string& path) {
         return false;
     }
     if (std::memcmp(header_.magic, "RPCP", 4) != 0) {
+        Close();
+        return false;
+    }
+    const auto codec_name = GetCodecName(header_);
+    if (IsCompressedChunkFormat(header_) &&
+        (codec_service_ == nullptr || codec_service_->GetName() != codec_name)) {
         Close();
         return false;
     }
@@ -276,6 +298,28 @@ bool RpcapReader::LoadNextChunk() {
     if (payload_size > 0 && !ReadBytes(payload.data(), payload.size())) {
         has_more_ = false;
         return false;
+    }
+
+    const auto codec_name = GetCodecName(header_);
+    if (IsCompressedChunkFormat(header_)) {
+        if (payload.size() < sizeof(uint64_t) ||
+            codec_service_ == nullptr ||
+            codec_service_->GetName() != codec_name) {
+            has_more_ = false;
+            return false;
+        }
+
+        uint64_t original_size = 0;
+        std::memcpy(&original_size, payload.data(), sizeof(original_size));
+        auto decompressed = codec_service_->Decompress(
+            payload.data() + sizeof(original_size),
+            payload.size() - sizeof(original_size),
+            static_cast<size_t>(original_size));
+        if (decompressed.size() != static_cast<size_t>(original_size)) {
+            has_more_ = false;
+            return false;
+        }
+        payload = std::move(decompressed);
     }
 
     next_chunk_offset_ += sizeof(chunk_id) + sizeof(packet_count) + sizeof(payload_size) + payload_size;

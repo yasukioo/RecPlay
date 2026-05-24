@@ -10,9 +10,28 @@
 #define RECPLAY_HAS_JSON 0
 #endif
 
+#include <chrono>
 #include <utility>
 
 namespace recplay {
+
+namespace {
+
+uint64_t GetSteadyClockNanoseconds() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+uint64_t ComputeRelativeCaptureTimestamp(uint64_t captureEpochNs) {
+    const auto nowNs = GetSteadyClockNanoseconds();
+    if (captureEpochNs == 0 || nowNs <= captureEpochNs) {
+        return 1;
+    }
+    return nowNs - captureEpochNs;
+}
+
+} // namespace
 
 UdpProtocolService::~UdpProtocolService() {
     StopReplay();
@@ -36,8 +55,31 @@ bool UdpProtocolService::StartCapture(const std::string& configJson, PacketCallb
     return false;
 #else
     try {
-        auto ioContext = std::make_unique<boost::asio::io_context>();
-        auto socket = std::make_unique<boost::asio::ip::udp::socket>(*ioContext);
+        std::unique_ptr<boost::asio::io_context> createdIoContext;
+        std::unique_ptr<
+            boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> createdGuard;
+        boost::asio::io_context* activeIoContext = nullptr;
+        bool startIoThread = false;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (io_context_) {
+                activeIoContext = io_context_.get();
+            } else {
+                createdIoContext = std::make_unique<boost::asio::io_context>();
+                activeIoContext = createdIoContext.get();
+                createdGuard = std::make_unique<
+                    boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+                    boost::asio::make_work_guard(*activeIoContext));
+                startIoThread = true;
+            }
+        }
+
+        if (activeIoContext == nullptr) {
+            return false;
+        }
+
+        auto socket = std::make_unique<boost::asio::ip::udp::socket>(*activeIoContext);
 
         socket->open(boost::asio::ip::udp::v4());
         socket->set_option(boost::asio::ip::udp::socket::reuse_address(true));
@@ -53,16 +95,16 @@ bool UdpProtocolService::StartCapture(const std::string& configJson, PacketCallb
             socket->set_option(boost::asio::ip::multicast::join_group(groupAddress));
         }
 
-        auto guard = std::make_unique<
-            boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
-            boost::asio::make_work_guard(*ioContext));
-
         {
             std::lock_guard<std::mutex> lock(mutex_);
             capture_config_ = config;
             capture_callback_ = std::move(cb);
-            io_context_ = std::move(ioContext);
-            work_guard_ = std::move(guard);
+            if (createdIoContext) {
+                io_context_ = std::move(createdIoContext);
+            }
+            if (createdGuard) {
+                work_guard_ = std::move(createdGuard);
+            }
             capture_socket_ = std::move(socket);
             channels_ = {ChannelInfo{
                 config.channel_id,
@@ -77,14 +119,17 @@ bool UdpProtocolService::StartCapture(const std::string& configJson, PacketCallb
             }};
             capturing_ = true;
             sequence_.store(0, std::memory_order_release);
+            capture_epoch_ns_.store(GetSteadyClockNanoseconds(), std::memory_order_release);
         }
 
         StartReceiveLoop();
-        io_thread_ = std::thread([this] {
-            if (io_context_) {
-                io_context_->run();
-            }
-        });
+        if (startIoThread) {
+            io_thread_ = std::thread([this] {
+                if (io_context_) {
+                    io_context_->run();
+                }
+            });
+        }
         return true;
     } catch (...) {
         StopCapture();
@@ -97,6 +142,9 @@ void UdpProtocolService::StopCapture() {
 #if RECPLAY_HAS_BOOST_ASIO
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        capturing_ = false;
+        capture_callback_ = {};
+        channels_.clear();
         if (capture_socket_) {
             boost::system::error_code ec;
             capture_socket_->cancel(ec);
@@ -108,9 +156,7 @@ void UdpProtocolService::StopCapture() {
 #endif
 
     std::lock_guard<std::mutex> lock(mutex_);
-    capturing_ = false;
-    capture_callback_ = {};
-    channels_.clear();
+    capture_epoch_ns_.store(0, std::memory_order_release);
 }
 
 bool UdpProtocolService::IsCapturing() const {
@@ -252,6 +298,7 @@ void UdpProtocolService::StartReceiveLoop() {
         [this](const boost::system::error_code& error, std::size_t bytesReceived) {
             PacketCallback callback;
             RuntimeConfig config;
+            uint64_t captureEpochNs = 0;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (error || !capturing_ || !capture_callback_) {
@@ -259,9 +306,14 @@ void UdpProtocolService::StartReceiveLoop() {
                 }
                 callback = capture_callback_;
                 config = capture_config_;
+                captureEpochNs = capture_epoch_ns_.load(std::memory_order_acquire);
             }
 
+            const auto captureTimestampNs = ComputeRelativeCaptureTimestamp(captureEpochNs);
             auto packet = std::make_shared<Packet>();
+            packet->t_capture = captureTimestampNs;
+            packet->t_origin = captureTimestampNs;
+            packet->t_record = captureTimestampNs;
             packet->channel_id = config.channel_id;
             packet->topic = config.topic;
             packet->protocol_id = static_cast<uint16_t>(ProtocolId::kUDP);
@@ -291,11 +343,17 @@ void UdpProtocolService::ResetIoRuntimeIfUnused() {
         if (io_thread_.joinable()) {
             threadToJoin = std::move(io_thread_);
         }
-        work_guard_.reset();
-        io_context_.reset();
     }
     if (threadToJoin.joinable()) {
         threadToJoin.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (capture_socket_ || replay_socket_) {
+            return;
+        }
+        work_guard_.reset();
+        io_context_.reset();
     }
 #endif
 }

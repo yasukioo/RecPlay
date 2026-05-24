@@ -7,6 +7,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -71,6 +72,7 @@ private:
     std::array<uint8_t, 65536> receive_buffer_{};
     std::thread io_thread_;
     std::atomic<uint32_t> sequence_{0};
+    std::atomic<uint64_t> capture_epoch_ns_{0};
 #endif
 };
 

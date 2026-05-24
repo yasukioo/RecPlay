@@ -5,13 +5,138 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <memory>
+#include <optional>
 #include <utility>
+
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
 
 namespace recplay {
 
-StatsCollector::StatsCollector()
+namespace {
+
+StatsCollector::CpuUsageSampler CreateDefaultCpuUsageSampler() {
+#if defined(_WIN32)
+    struct State {
+        bool has_previous = false;
+        uint64_t idle = 0;
+        uint64_t total = 0;
+    };
+
+    auto state = std::make_shared<State>();
+    return [state]() -> std::optional<double> {
+        FILETIME idleTime{};
+        FILETIME kernelTime{};
+        FILETIME userTime{};
+        if (!GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
+            return std::nullopt;
+        }
+
+        ULARGE_INTEGER idleValue{};
+        idleValue.LowPart = idleTime.dwLowDateTime;
+        idleValue.HighPart = idleTime.dwHighDateTime;
+
+        ULARGE_INTEGER kernelValue{};
+        kernelValue.LowPart = kernelTime.dwLowDateTime;
+        kernelValue.HighPart = kernelTime.dwHighDateTime;
+
+        ULARGE_INTEGER userValue{};
+        userValue.LowPart = userTime.dwLowDateTime;
+        userValue.HighPart = userTime.dwHighDateTime;
+
+        const uint64_t idle = idleValue.QuadPart;
+        const uint64_t total = kernelValue.QuadPart + userValue.QuadPart;
+        if (!state->has_previous) {
+            state->has_previous = true;
+            state->idle = idle;
+            state->total = total;
+            return std::nullopt;
+        }
+
+        const uint64_t idleDelta = idle - state->idle;
+        const uint64_t totalDelta = total - state->total;
+        state->idle = idle;
+        state->total = total;
+
+        if (totalDelta == 0 || totalDelta < idleDelta) {
+            return 0.0;
+        }
+
+        const double usage =
+            static_cast<double>(totalDelta - idleDelta) * 100.0 /
+            static_cast<double>(totalDelta);
+        return std::clamp(usage, 0.0, 100.0);
+    };
+#elif defined(__linux__)
+    struct State {
+        bool has_previous = false;
+        uint64_t idle = 0;
+        uint64_t total = 0;
+    };
+
+    auto state = std::make_shared<State>();
+    return [state]() -> std::optional<double> {
+        std::ifstream input("/proc/stat");
+        if (!input.is_open()) {
+            return std::nullopt;
+        }
+
+        std::string label;
+        uint64_t user = 0;
+        uint64_t nice = 0;
+        uint64_t system = 0;
+        uint64_t idle = 0;
+        uint64_t iowait = 0;
+        uint64_t irq = 0;
+        uint64_t softirq = 0;
+        uint64_t steal = 0;
+        if (!(input >> label >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal) ||
+            label != "cpu") {
+            return std::nullopt;
+        }
+
+        const uint64_t idleAll = idle + iowait;
+        const uint64_t total = user + nice + system + idle + iowait + irq + softirq + steal;
+        if (!state->has_previous) {
+            state->has_previous = true;
+            state->idle = idleAll;
+            state->total = total;
+            return std::nullopt;
+        }
+
+        const uint64_t idleDelta = idleAll - state->idle;
+        const uint64_t totalDelta = total - state->total;
+        state->idle = idleAll;
+        state->total = total;
+
+        if (totalDelta == 0 || totalDelta < idleDelta) {
+            return 0.0;
+        }
+
+        const double usage =
+            static_cast<double>(totalDelta - idleDelta) * 100.0 /
+            static_cast<double>(totalDelta);
+        return std::clamp(usage, 0.0, 100.0);
+    };
+#else
+    return []() -> std::optional<double> {
+        return std::nullopt;
+    };
+#endif
+}
+
+} // namespace
+
+StatsCollector::StatsCollector(CpuUsageSampler cpuUsageSampler)
     : last_flush_at_(std::chrono::steady_clock::now()),
-      worker_(&StatsCollector::RunAggregator, this) {}
+      cpu_usage_sampler_(cpuUsageSampler ? std::move(cpuUsageSampler) : CreateDefaultCpuUsageSampler()) {
+    RefreshCpuUsageLocked();
+    worker_ = std::thread(&StatsCollector::RunAggregator, this);
+}
 
 StatsCollector::~StatsCollector() {
     {
@@ -26,9 +151,10 @@ StatsCollector::~StatsCollector() {
 
 StatsSnapshot StatsCollector::GetSnapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    const_cast<StatsCollector*>(this)->RefreshCpuUsageLocked();
     const auto now = std::chrono::steady_clock::now();
     const double intervalSeconds =
-        std::max(std::chrono::duration<double>(now - last_flush_at_).count(), 1e-6);
+        (std::max)(std::chrono::duration<double>(now - last_flush_at_).count(), 1e-6);
     return BuildSnapshotViewLocked(intervalSeconds, true);
 }
 
@@ -103,7 +229,8 @@ void StatsCollector::RunAggregator() {
         last_flush_at_ = now;
 
         const double intervalSeconds =
-            std::max(std::chrono::duration<double>(elapsed).count(), 1e-6);
+            (std::max)(std::chrono::duration<double>(elapsed).count(), 1e-6);
+        RefreshCpuUsageLocked();
         snapshot_ = BuildSnapshotViewLocked(intervalSeconds, false);
         ResetDeltasLocked();
         const StatsSnapshot currentSnapshot = snapshot_;
@@ -167,6 +294,15 @@ StatsSnapshot StatsCollector::BuildSnapshotViewLocked(double intervalSeconds,
     return snapshot;
 }
 
+void StatsCollector::RefreshCpuUsageLocked() {
+    if (!cpu_usage_sampler_) {
+        snapshot_.cpu_usage_percent = std::nullopt;
+        return;
+    }
+
+    snapshot_.cpu_usage_percent = cpu_usage_sampler_();
+}
+
 void StatsCollector::ResetDeltasLocked() {
     delta_packets_ = 0;
     delta_drops_ = 0;
@@ -199,8 +335,8 @@ double StatsCollector::ComputeP99Locked(const std::deque<double>& latencies) {
     std::sort(sorted.begin(), sorted.end());
 
     const double rank = std::ceil(0.99 * static_cast<double>(sorted.size()));
-    const size_t index = static_cast<size_t>(std::max(1.0, rank)) - 1;
-    return sorted[std::min(index, sorted.size() - 1)];
+    const size_t index = static_cast<size_t>((std::max)(1.0, rank)) - 1;
+    return sorted[(std::min)(index, sorted.size() - 1)];
 }
 
 } // namespace recplay

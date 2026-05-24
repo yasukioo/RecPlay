@@ -89,6 +89,21 @@ export function getPluginDetail(id: string): Promise<PluginInfo> {
   return requestJson(`/api/plugins/${id}`);
 }
 
+export function setPluginConfig(
+  id: string,
+  configFields: NonNullable<PluginInfo["config_fields"]>,
+): Promise<PluginInfo> {
+  return postJson(`/api/plugins/${id}/config`, { config_fields: configFields });
+}
+
+export function startPlugin(id: string): Promise<PluginInfo> {
+  return postJson(`/api/plugins/${id}/start`);
+}
+
+export function stopPlugin(id: string): Promise<PluginInfo> {
+  return postJson(`/api/plugins/${id}/stop`);
+}
+
 // --- Topic Mapping API ---
 
 export function getTopicMappings(): Promise<TopicMapping[]> {

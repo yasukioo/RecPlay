@@ -3,6 +3,7 @@
 
 #include "RpcapWriter.h"
 
+#include "ICodecService.h"
 #include "IoBackendFactory.h"
 
 #include <algorithm>
@@ -44,7 +45,18 @@ void AppendBytes(std::vector<uint8_t>& buffer, const std::vector<uint8_t>& value
     buffer.insert(buffer.end(), value.begin(), value.end());
 }
 
+bool ShouldUseCodec(const std::string& requestedCodec, const ICodecService* codecService) {
+    return codecService != nullptr &&
+        !requestedCodec.empty() &&
+        requestedCodec != "none" &&
+        codecService->GetName() == requestedCodec;
+}
+
 } // namespace
+
+void RpcapWriter::SetCodecService(ICodecService* codec) {
+    codec_service_ = codec;
+}
 
 bool RpcapWriter::Create(const std::string& path,
                          const std::vector<ChannelInfo>& channels,
@@ -56,12 +68,15 @@ bool RpcapWriter::Create(const std::string& path,
 
     header_ = {};
     std::memset(header_.codec, 0, sizeof(header_.codec));
-    std::strncpy(header_.codec, codec.c_str(), sizeof(header_.codec) - 1);
     header_.creation_time = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
 
-    codec_ = codec;
+    codec_ = ShouldUseCodec(codec, codec_service_) ? codec : std::string{};
+    header_.version = codec_.empty() ? 1U : 2U;
+    if (!codec_.empty()) {
+        std::strncpy(header_.codec, codec_.c_str(), sizeof(header_.codec) - 1);
+    }
     channels_ = channels;
     chunk_.clear();
     footer_entries_.clear();
@@ -176,14 +191,30 @@ bool RpcapWriter::FlushChunk(bool force_keyframe) {
     }
 
     const auto payload = BuildChunkPayload();
-    const auto payload_size = static_cast<uint64_t>(payload.size());
+    std::vector<uint8_t> stored_payload = payload;
+    if (!codec_.empty()) {
+        auto compressed_payload = codec_service_->Compress(payload.data(), payload.size());
+        if (payload.size() > 0 && compressed_payload.empty()) {
+            return false;
+        }
+
+        stored_payload.clear();
+        stored_payload.reserve(sizeof(uint64_t) + compressed_payload.size());
+        AppendScalar(stored_payload, static_cast<uint64_t>(payload.size()));
+        stored_payload.insert(
+            stored_payload.end(),
+            compressed_payload.begin(),
+            compressed_payload.end());
+    }
+
+    const auto payload_size = static_cast<uint64_t>(stored_payload.size());
     const auto packet_count = static_cast<uint64_t>(chunk_.size());
     const auto chunk_id = current_chunk_id_++;
 
     if (!WriteBytes(&chunk_id, sizeof(chunk_id)) ||
         !WriteBytes(&packet_count, sizeof(packet_count)) ||
         !WriteBytes(&payload_size, sizeof(payload_size)) ||
-        !WriteBytes(payload.data(), payload.size())) {
+        !WriteBytes(stored_payload.data(), stored_payload.size())) {
         return false;
     }
 

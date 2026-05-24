@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -79,6 +80,7 @@ struct StatsSnapshot {
     uint32_t ringbuf_used = 0;
     uint32_t ringbuf_capacity = 0;
     uint64_t disk_queue_bytes = 0;
+    std::optional<double> cpu_usage_percent;
     std::map<std::string, ProtocolStats> per_protocol;
     std::map<uint32_t, ChannelStats> per_channel;
 };

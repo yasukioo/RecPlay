@@ -1,5 +1,33 @@
 cmake_minimum_required(VERSION 3.19)
 
+set(_recplay_vcpkg_overlay_dir "${CMAKE_CURRENT_LIST_DIR}/vcpkg-overlay-ports")
+set(_recplay_overlay_ports "${_recplay_vcpkg_overlay_dir}")
+if(DEFINED VCPKG_OVERLAY_PORTS AND NOT VCPKG_OVERLAY_PORTS STREQUAL "")
+    list(APPEND _recplay_overlay_ports ${VCPKG_OVERLAY_PORTS})
+endif()
+list(REMOVE_DUPLICATES _recplay_overlay_ports)
+set(
+    VCPKG_OVERLAY_PORTS
+    "${_recplay_overlay_ports}"
+    CACHE STRING "RecPlay overlay ports"
+    FORCE
+)
+
+set(_recplay_install_options)
+if(DEFINED VCPKG_INSTALL_OPTIONS AND NOT VCPKG_INSTALL_OPTIONS STREQUAL "")
+    set(_recplay_install_options ${VCPKG_INSTALL_OPTIONS})
+    list(FILTER _recplay_install_options EXCLUDE REGEX "--x-buildtrees-root=.*/\\.vcpkg/buildtrees")
+    list(FILTER _recplay_install_options EXCLUDE REGEX "--x-packages-root=.*/\\.vcpkg/packages")
+    list(FILTER _recplay_install_options EXCLUDE REGEX "--downloads-root=.*/\\.vcpkg/downloads")
+    list(REMOVE_DUPLICATES _recplay_install_options)
+    set(
+        VCPKG_INSTALL_OPTIONS
+        "${_recplay_install_options}"
+        CACHE STRING "RecPlay filtered vcpkg install options"
+        FORCE
+    )
+endif()
+
 project(RecPlay VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -77,7 +105,10 @@ add_subdirectory(bundles/protocol_udp)
 add_subdirectory(bundles/protocol_tcp)
 add_subdirectory(bundles/codec_zstd)
 
-add_executable(recplay main.cpp)
+add_executable(recplay
+    main.cpp
+    BundlePathResolver.cpp
+)
 target_link_libraries(recplay
     PRIVATE
         recplay_framework

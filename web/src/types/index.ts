@@ -1,5 +1,8 @@
 /** Shared types for RecPlay frontend */
 
+export type ThemeMode = "dark" | "light";
+export type Locale = "en-US" | "zh-CN";
+
 export type SessionState =
   | "Idle"
   | "Recording"
@@ -13,12 +16,20 @@ export interface SessionTransition {
   new_state: string;
 }
 
+export interface SessionConfig {
+  recordPath: string;
+  playbackPath: string;
+}
+
 export interface SessionStateSnapshot {
   state: SessionState;
   duration_ns: number;
   position_ns: number;
   speed: number;
+  loop_start_ns: number | null;
+  loop_end_ns: number | null;
   lastTransition: SessionTransition | null;
+  config: SessionConfig;
 }
 
 export interface StatsSnapshot {
@@ -30,6 +41,7 @@ export interface StatsSnapshot {
   ringbuf_used: number;
   ringbuf_capacity: number;
   disk_queue_bytes: number;
+  cpu_usage_percent: number | null;
 }
 
 export interface StatsHistoryPoint {
@@ -37,6 +49,12 @@ export interface StatsHistoryPoint {
   total_packets: number;
   total_drops: number;
   total_throughput_mbps: number;
+  drop_rate?: number;
+  write_latency_p99_ms?: number;
+  ringbuf_used?: number;
+  ringbuf_capacity?: number;
+  disk_queue_bytes?: number;
+  cpu_usage_percent?: number | null;
 }
 
 export interface PluginInfo {
@@ -45,6 +63,11 @@ export interface PluginInfo {
   version: string;
   state: "active" | "inactive" | "error";
   bundle_path: string;
+  config_fields?: Array<{
+    key: string;
+    label: string;
+    value: string;
+  }>;
 }
 
 export interface TimelineState {

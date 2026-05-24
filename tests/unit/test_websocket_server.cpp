@@ -10,6 +10,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace {
@@ -87,6 +88,7 @@ void TestLifecycleAndSubscription() {
 
     stats.snapshot.total_packets = 12;
     stats.snapshot.total_drops = 1;
+    stats.snapshot.cpu_usage_percent = 41.25;
     stats.Emit();
     session.Emit(SessionState::Idle, SessionState::Playing);
 
@@ -94,6 +96,8 @@ void TestLifecycleAndSubscription() {
     Expect(messages.size() == 2, "server should record stats and state broadcasts");
     Expect(messages[0].find("\"type\":\"stats\"") != std::string::npos, "first message should be stats");
     Expect(messages[0].find("\"total_packets\":12") != std::string::npos, "stats message should contain payload");
+    Expect(messages[0].find("\"cpu_usage_percent\":41.25") != std::string::npos,
+           "stats message should include actual cpu usage percent");
     Expect(messages[1].find("\"type\":\"state_changed\"") != std::string::npos, "second message should be state change");
     Expect(messages[1].find("\"old_state\":\"Idle\"") != std::string::npos, "state message should include old state");
     Expect(messages[1].find("\"new_state\":\"Playing\"") != std::string::npos, "state message should include new state");
@@ -109,6 +113,22 @@ void TestManualBroadcastAndClear() {
     Expect(server.GetBroadcastMessages().size() == 1, "manual broadcast should be recorded");
     server.ClearBroadcastMessages();
     Expect(server.GetBroadcastMessages().empty(), "clear should remove recorded broadcasts");
+    server.Stop();
+}
+
+void TestBroadcastUsesConfiguredTransport() {
+    WebSocketServer server;
+    std::string delivered;
+    server.SetTransport([&](std::string_view message) {
+        delivered.assign(message.begin(), message.end());
+    });
+
+    server.Start();
+    server.Broadcast("{\"type\":\"manual-transport\"}");
+
+    Expect(delivered == "{\"type\":\"manual-transport\"}",
+           "transport should receive broadcast payload");
+
     server.Stop();
 }
 
@@ -168,6 +188,7 @@ int main() {
     try {
         TestLifecycleAndSubscription();
         TestManualBroadcastAndClear();
+        TestBroadcastUsesConfiguredTransport();
         TestSubscriptionsAreRefreshedAfterServiceInjection();
         TestStaleSubscriptionsDoNotBroadcastAfterRebinding();
         return 0;

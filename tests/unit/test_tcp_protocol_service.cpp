@@ -45,6 +45,63 @@ bool WaitUntil(Predicate&& predicate, std::chrono::milliseconds timeout) {
     return predicate();
 }
 
+#if RECPLAY_TEST_HAS_BOOST_ASIO
+class LoopbackTcpServer {
+public:
+    LoopbackTcpServer()
+        : acceptor_(
+            io_context_,
+            boost::asio::ip::tcp::endpoint(
+                boost::asio::ip::make_address("127.0.0.1"),
+                0)) {}
+
+    ~LoopbackTcpServer() { Stop(); }
+
+    unsigned short Port() const {
+        return acceptor_.local_endpoint().port();
+    }
+
+    void Start(size_t expectedConnections = 1) {
+        thread_ = std::thread([this, expectedConnections] {
+            for (size_t i = 0; i < expectedConnections; ++i) {
+                boost::asio::ip::tcp::socket socket(io_context_);
+                boost::system::error_code acceptError;
+                acceptor_.accept(socket, acceptError);
+                if (acceptError) {
+                    return;
+                }
+
+                std::array<uint8_t, 256> buffer{};
+                while (true) {
+                    boost::system::error_code readError;
+                    const auto bytesRead = socket.read_some(boost::asio::buffer(buffer), readError);
+                    if (readError == boost::asio::error::eof || bytesRead == 0) {
+                        break;
+                    }
+                    if (readError) {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    void Stop() {
+        boost::system::error_code ec;
+        acceptor_.cancel(ec);
+        acceptor_.close(ec);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    boost::asio::io_context io_context_;
+    boost::asio::ip::tcp::acceptor acceptor_;
+    std::thread thread_;
+};
+#endif
+
 void TestSchemaIncludesTcpFields() {
     TcpProtocolService service;
     const std::string schema = service.GetConfigSchema();
@@ -80,18 +137,25 @@ void TestCaptureLifecycleAndChannels() {
 
 void TestReplayLifecycle() {
     TcpProtocolService service;
-    const std::string config =
-        R"({"mode":"client","host":"127.0.0.1","port":9})";
-
-    const bool started = service.StartReplay(config);
 
 #if RECPLAY_TEST_HAS_BOOST_ASIO && RECPLAY_TEST_HAS_JSON
+    LoopbackTcpServer replayServer;
+    replayServer.Start();
+    const std::string config =
+        std::string(R"({"mode":"client","host":"127.0.0.1","port":)") +
+        std::to_string(replayServer.Port()) +
+        "}";
+    const bool started = service.StartReplay(config);
     Expect(started, "replay should start when asio and json are available");
     Expect(service.IsReplaying(), "service should report replaying");
     Expect(!service.SendPacket(nullptr), "null packets should be rejected");
     service.StopReplay();
     Expect(!service.IsReplaying(), "service should stop replaying");
+    replayServer.Stop();
 #else
+    const std::string config =
+        R"({"mode":"client","host":"127.0.0.1","port":9})";
+    const bool started = service.StartReplay(config);
     Expect(!started, "replay should fail cleanly when asio/json are unavailable");
     Expect(!service.IsReplaying(), "service should remain stopped without dependencies");
 #endif
@@ -101,10 +165,14 @@ void TestCaptureAndReplayStopIndependently() {
     TcpProtocolService service;
     const std::string captureConfig =
         R"({"mode":"server","host":"127.0.0.1","port":0,"channel_id":11,"channel_name":"tcp-test","topic":"tcp/topic"})";
-    const std::string replayConfig =
-        R"({"mode":"client","host":"127.0.0.1","port":9})";
 
 #if RECPLAY_TEST_HAS_BOOST_ASIO && RECPLAY_TEST_HAS_JSON
+    LoopbackTcpServer replayServer;
+    replayServer.Start();
+    const std::string replayConfig =
+        std::string(R"({"mode":"client","host":"127.0.0.1","port":)") +
+        std::to_string(replayServer.Port()) +
+        "}";
     Expect(service.StartReplay(replayConfig), "replay should start for independence test");
     Expect(service.StartCapture(captureConfig, [](recplay::PacketPtr) {}),
            "capture should start for independence test");
@@ -117,7 +185,10 @@ void TestCaptureAndReplayStopIndependently() {
 
     service.StopReplay();
     Expect(!service.IsReplaying(), "replay stop should stop replay");
+    replayServer.Stop();
 #else
+    const std::string replayConfig =
+        R"({"mode":"client","host":"127.0.0.1","port":9})";
     Expect(!service.StartReplay(replayConfig), "replay should fail cleanly without dependencies");
     Expect(!service.StartCapture(captureConfig, [](recplay::PacketPtr) {}),
            "capture should fail cleanly without dependencies");

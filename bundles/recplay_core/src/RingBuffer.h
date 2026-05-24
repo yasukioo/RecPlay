@@ -7,30 +7,31 @@
 #include <atomic>
 #include <cstddef>
 #include <optional>
+#include <utility>
 
 namespace recplay {
 
-/// SPSC (Single-Producer Single-Consumer) 无锁环形缓冲区
-/// Capacity 必须是 2 的幂
+// SPSC (Single-Producer Single-Consumer) ring buffer.
+// Capacity must be a power of 2.
 template <typename T, size_t Capacity>
 class SPSCRingBuffer {
     static_assert((Capacity & (Capacity - 1)) == 0,
                   "Capacity must be a power of 2");
 
 public:
-    /// 尝试入队 (生产者调用)，满则返回 false
+    // Try to push an item. Returns false when the buffer is full.
     bool TryPush(const T& item) {
         const auto head = head_.load(std::memory_order_relaxed);
         const auto next = (head + 1) & kMask;
         if (next == tail_.load(std::memory_order_acquire)) {
-            return false;  // 满
+            return false;
         }
         buffer_[head] = item;
         head_.store(next, std::memory_order_release);
         return true;
     }
 
-    /// 尝试入队 (移动语义)
+    // Try to push an item by move. Returns false when the buffer is full.
     bool TryPush(T&& item) {
         const auto head = head_.load(std::memory_order_relaxed);
         const auto next = (head + 1) & kMask;
@@ -42,22 +43,22 @@ public:
         return true;
     }
 
-    /// 尝试出队 (消费者调用)，空则返回 nullopt
+    // Try to pop an item. Returns nullopt when the buffer is empty.
     std::optional<T> TryPop() {
         const auto tail = tail_.load(std::memory_order_relaxed);
         if (tail == head_.load(std::memory_order_acquire)) {
-            return std::nullopt;  // 空
+            return std::nullopt;
         }
         auto item = std::move(buffer_[tail]);
         tail_.store((tail + 1) & kMask, std::memory_order_release);
         return item;
     }
 
-    /// 当前队列中元素数量 (近似值，用于统计)
+    // Approximate number of items currently in the queue.
     size_t Size() const {
-        const auto h = head_.load(std::memory_order_acquire);
-        const auto t = tail_.load(std::memory_order_acquire);
-        return (h - t + Capacity) & kMask;
+        const auto head = head_.load(std::memory_order_acquire);
+        const auto tail = tail_.load(std::memory_order_acquire);
+        return (head - tail + Capacity) & kMask;
     }
 
     size_t GetCapacity() const { return Capacity; }
@@ -68,10 +69,10 @@ public:
 private:
     static constexpr size_t kMask = Capacity - 1;
 
-    // 分离到不同缓存行，避免 false sharing
+    // Separate producer and consumer indices to reduce false sharing.
     alignas(64) std::atomic<size_t> head_{0};
     alignas(64) std::atomic<size_t> tail_{0};
-    std::array<T, Capacity> buffer_;
+    std::array<T, Capacity> buffer_{};
 };
 
 } // namespace recplay

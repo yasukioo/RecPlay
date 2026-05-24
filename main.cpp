@@ -1,6 +1,8 @@
 // Copyright (c) 2026 yasukioo
 // Author: yasukioo <yasukioo@outlook.com>
 
+#include "BundlePathResolver.h"
+
 #include <cppmicroservices/FrameworkFactory.h>
 #include <cppmicroservices/Framework.h>
 #include <cppmicroservices/FrameworkEvent.h>
@@ -135,18 +137,14 @@ RuntimeConfig LoadConfig(const std::string& path) {
 
 void InstallBundles(cppmicroservices::BundleContext context,
                     const RuntimeConfig& config) {
-    const auto config_root = config.config_path.empty()
-        ? std::filesystem::current_path()
-        : config.config_path.parent_path();
+    const auto process_root = std::filesystem::current_path();
     std::vector<std::string> bundle_locations;
     std::set<std::filesystem::path> seen_locations;
 
-    for (const auto& raw_path : config.bundle_search_paths) {
-        auto root = std::filesystem::path(raw_path);
-        if (root.is_relative()) {
-            root = config_root / root;
-        }
-        root = std::filesystem::weakly_canonical(root);
+    for (auto root : recplay::ResolveBundleSearchRoots(
+             config.bundle_search_paths,
+             config.config_path,
+             process_root)) {
         if (!std::filesystem::exists(root) || !std::filesystem::is_directory(root)) {
             LogInfo("bundle search path missing: " + root.string());
             continue;

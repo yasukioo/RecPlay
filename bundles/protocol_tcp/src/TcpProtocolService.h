@@ -7,6 +7,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -51,7 +52,10 @@ private:
 
     bool LoadConfig(const std::string& configJson, RuntimeConfig& config) const;
     void StartAcceptLoop();
-    void StartReadLoop();
+    void StartReadLoop(
+        const std::shared_ptr<boost::asio::ip::tcp::socket>& socket,
+        const std::shared_ptr<std::array<uint8_t, 65536>>& buffer);
+    void RemoveCaptureSocket(const std::shared_ptr<boost::asio::ip::tcp::socket>& socket);
     void ResetIoRuntimeIfUnused();
 
     mutable std::mutex mutex_;
@@ -66,11 +70,11 @@ private:
     std::unique_ptr<boost::asio::io_context> io_context_;
     std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
     std::unique_ptr<boost::asio::ip::tcp::acceptor> acceptor_;
-    std::unique_ptr<boost::asio::ip::tcp::socket> capture_socket_;
     std::unique_ptr<boost::asio::ip::tcp::socket> replay_socket_;
-    std::array<uint8_t, 65536> receive_buffer_{};
+    std::vector<std::shared_ptr<boost::asio::ip::tcp::socket>> capture_sockets_;
     std::thread io_thread_;
     std::atomic<uint32_t> sequence_{0};
+    std::atomic<uint64_t> capture_epoch_ns_{0};
 #endif
 };
 

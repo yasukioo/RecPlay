@@ -127,6 +127,18 @@ void TestGetSnapshotIncludesPendingStatsBeforeFlush() {
     Expect(snapshot.disk_queue_bytes == 2048, "expected immediate disk queue bytes");
 }
 
+void TestCpuUsageSamplerFeedsSnapshots() {
+    StatsCollector collector([]() -> std::optional<double> {
+        return 37.5;
+    });
+
+    const StatsSnapshot snapshot = collector.GetSnapshot();
+
+    Expect(snapshot.cpu_usage_percent.has_value(), "expected cpu usage percent to be present");
+    Expect(NearlyEqual(*snapshot.cpu_usage_percent, 37.5, 0.01),
+           "expected injected cpu usage percent to be forwarded");
+}
+
 } // namespace
 
 int main() {
@@ -134,6 +146,7 @@ int main() {
         TestAggregatesPeriodically();
         TestThroughputResetsBetweenWindows();
         TestGetSnapshotIncludesPendingStatsBeforeFlush();
+        TestCpuUsageSamplerFeedsSnapshots();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

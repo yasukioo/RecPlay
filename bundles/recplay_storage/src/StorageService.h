@@ -9,8 +9,10 @@
 
 namespace recplay {
 
+class ICodecService;
 class StorageService final : public IStorageService {
 public:
+    void SetCodecService(ICodecService* codec);
     bool CreateFile(const std::string& path,
                     const std::vector<ChannelInfo>& channels,
                     const std::string& codec = "zstd") override;

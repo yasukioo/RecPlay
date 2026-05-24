@@ -10,7 +10,28 @@
 #define RECPLAY_HAS_JSON 0
 #endif
 
+#include <algorithm>
+#include <chrono>
+
 namespace recplay {
+
+namespace {
+
+uint64_t GetSteadyClockNanoseconds() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+uint64_t ComputeRelativeCaptureTimestamp(uint64_t captureEpochNs) {
+    const auto nowNs = GetSteadyClockNanoseconds();
+    if (captureEpochNs == 0 || nowNs <= captureEpochNs) {
+        return 1;
+    }
+    return nowNs - captureEpochNs;
+}
+
+} // namespace
 
 TcpProtocolService::~TcpProtocolService() {
     StopReplay();
@@ -34,15 +55,38 @@ bool TcpProtocolService::StartCapture(const std::string& configJson, PacketCallb
     return false;
 #else
     try {
-        auto ioContext = std::make_unique<boost::asio::io_context>();
-        auto guard = std::make_unique<
-            boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
-            boost::asio::make_work_guard(*ioContext));
+        std::unique_ptr<boost::asio::io_context> createdIoContext;
+        std::unique_ptr<
+            boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> createdGuard;
+        boost::asio::io_context* activeIoContext = nullptr;
+        bool startIoThread = false;
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            io_context_ = std::move(ioContext);
-            work_guard_ = std::move(guard);
+            if (io_context_) {
+                activeIoContext = io_context_.get();
+            } else {
+                createdIoContext = std::make_unique<boost::asio::io_context>();
+                activeIoContext = createdIoContext.get();
+                createdGuard = std::make_unique<
+                    boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+                    boost::asio::make_work_guard(*activeIoContext));
+                startIoThread = true;
+            }
+        }
+
+        if (activeIoContext == nullptr) {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (createdIoContext) {
+                io_context_ = std::move(createdIoContext);
+            }
+            if (createdGuard) {
+                work_guard_ = std::move(createdGuard);
+            }
             capture_callback_ = std::move(cb);
             capture_config_ = config;
             channels_ = {ChannelInfo{
@@ -58,29 +102,36 @@ bool TcpProtocolService::StartCapture(const std::string& configJson, PacketCallb
             }};
             capturing_ = true;
             sequence_.store(0, std::memory_order_release);
+            capture_epoch_ns_.store(GetSteadyClockNanoseconds(), std::memory_order_release);
         }
 
         if (config.mode == "server") {
             acceptor_ = std::make_unique<boost::asio::ip::tcp::acceptor>(
-                *io_context_,
+                *activeIoContext,
                 boost::asio::ip::tcp::endpoint(
                     boost::asio::ip::make_address(config.host),
                     config.port));
-            capture_socket_ = std::make_unique<boost::asio::ip::tcp::socket>(*io_context_);
             StartAcceptLoop();
         } else {
-            capture_socket_ = std::make_unique<boost::asio::ip::tcp::socket>(*io_context_);
-            capture_socket_->connect(boost::asio::ip::tcp::endpoint(
+            auto socket = std::make_shared<boost::asio::ip::tcp::socket>(*activeIoContext);
+            socket->connect(boost::asio::ip::tcp::endpoint(
                 boost::asio::ip::make_address(config.host),
                 config.port));
-            StartReadLoop();
+            auto buffer = std::make_shared<std::array<uint8_t, 65536>>();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                capture_sockets_.push_back(socket);
+            }
+            StartReadLoop(socket, buffer);
         }
 
-        io_thread_ = std::thread([this] {
-            if (io_context_) {
-                io_context_->run();
-            }
-        });
+        if (startIoThread) {
+            io_thread_ = std::thread([this] {
+                if (io_context_) {
+                    io_context_->run();
+                }
+            });
+        }
         return true;
     } catch (...) {
         StopCapture();
@@ -91,28 +142,34 @@ bool TcpProtocolService::StartCapture(const std::string& configJson, PacketCallb
 
 void TcpProtocolService::StopCapture() {
 #if RECPLAY_HAS_BOOST_ASIO
+    std::vector<std::shared_ptr<boost::asio::ip::tcp::socket>> socketsToClose;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        capturing_ = false;
+        capture_callback_ = {};
+        channels_.clear();
         if (acceptor_) {
             boost::system::error_code ec;
             acceptor_->cancel(ec);
             acceptor_->close(ec);
             acceptor_.reset();
         }
-        if (capture_socket_) {
-            boost::system::error_code ec;
-            capture_socket_->cancel(ec);
-            capture_socket_->close(ec);
-            capture_socket_.reset();
+        socketsToClose = capture_sockets_;
+        capture_sockets_.clear();
+    }
+    for (const auto& socket : socketsToClose) {
+        if (!socket) {
+            continue;
         }
+        boost::system::error_code ec;
+        socket->cancel(ec);
+        socket->close(ec);
     }
     ResetIoRuntimeIfUnused();
 #endif
 
     std::lock_guard<std::mutex> lock(mutex_);
-    capturing_ = false;
-    capture_callback_ = {};
-    channels_.clear();
+    capture_epoch_ns_.store(0, std::memory_order_release);
 }
 
 bool TcpProtocolService::IsCapturing() const {
@@ -214,17 +271,17 @@ bool TcpProtocolService::IsReplaying() const {
 
 std::string TcpProtocolService::GetConfigSchema() const {
     return R"({
-  "type": "object",
-  "properties": {
-    "mode": { "type": "string", "enum": ["server", "client"], "default": "server" },
-    "host": { "type": "string", "default": "0.0.0.0" },
-    "port": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 7400 },
-    "channel_id": { "type": "integer", "minimum": 0, "default": 0 },
-    "channel_name": { "type": "string", "default": "tcp" },
-    "topic": { "type": "string", "default": "" }
-  },
-  "required": ["mode", "host", "port"]
-})";
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["server", "client"], "default": "server" },
+        "host": { "type": "string", "default": "0.0.0.0" },
+        "port": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 7400 },
+        "channel_id": { "type": "integer", "minimum": 0, "default": 0 },
+        "channel_name": { "type": "string", "default": "tcp" },
+        "topic": { "type": "string", "default": "" }
+      },
+      "required": ["mode", "host", "port"]
+    })";
 }
 
 std::vector<ChannelInfo> TcpProtocolService::GetChannels() const {
@@ -251,51 +308,110 @@ bool TcpProtocolService::LoadConfig(const std::string& configJson, RuntimeConfig
 
 void TcpProtocolService::StartAcceptLoop() {
 #if RECPLAY_HAS_BOOST_ASIO
-    if (!acceptor_ || !capture_socket_) {
+    if (!acceptor_ || !io_context_) {
         return;
     }
 
+    auto socket = std::make_shared<boost::asio::ip::tcp::socket>(*io_context_);
     acceptor_->async_accept(
-        *capture_socket_,
-        [this](const boost::system::error_code& error) {
+        *socket,
+        [this, socket](const boost::system::error_code& error) {
             if (error) {
+                bool shouldRetry = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    shouldRetry = capturing_ && static_cast<bool>(acceptor_);
+                }
+                if (shouldRetry) {
+                    StartAcceptLoop();
+                }
                 return;
             }
-            StartReadLoop();
+
+            auto buffer = std::make_shared<std::array<uint8_t, 65536>>();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!capturing_) {
+                    return;
+                }
+                capture_sockets_.push_back(socket);
+            }
+
+            StartReadLoop(socket, buffer);
+            StartAcceptLoop();
         });
 #endif
 }
 
-void TcpProtocolService::StartReadLoop() {
+void TcpProtocolService::StartReadLoop(
+    const std::shared_ptr<boost::asio::ip::tcp::socket>& socket,
+    const std::shared_ptr<std::array<uint8_t, 65536>>& buffer) {
 #if RECPLAY_HAS_BOOST_ASIO
-    if (!capture_socket_) {
+    if (!socket || !buffer) {
         return;
     }
 
-    capture_socket_->async_read_some(
-        boost::asio::buffer(receive_buffer_),
-        [this](const boost::system::error_code& error, std::size_t bytesReceived) {
+    socket->async_read_some(
+        boost::asio::buffer(*buffer),
+        [this, socket, buffer](const boost::system::error_code& error, std::size_t bytesReceived) {
             PacketCallback callback;
             RuntimeConfig config;
+            uint64_t captureEpochNs = 0;
+            bool shouldRemoveSocket = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (error || !capturing_ || !capture_callback_) {
-                    return;
+                    shouldRemoveSocket = static_cast<bool>(error);
+                } else {
+                    callback = capture_callback_;
+                    config = capture_config_;
+                    captureEpochNs = capture_epoch_ns_.load(std::memory_order_acquire);
                 }
-                callback = capture_callback_;
-                config = capture_config_;
             }
 
+            if (shouldRemoveSocket) {
+                RemoveCaptureSocket(socket);
+                return;
+            }
+
+            if (!callback) {
+                return;
+            }
+
+            const auto captureTimestampNs = ComputeRelativeCaptureTimestamp(captureEpochNs);
             auto packet = std::make_shared<Packet>();
+            packet->t_capture = captureTimestampNs;
+            packet->t_origin = captureTimestampNs;
+            packet->t_record = captureTimestampNs;
             packet->channel_id = config.channel_id;
             packet->topic = config.topic;
             packet->protocol_id = static_cast<uint16_t>(ProtocolId::kTCP);
             packet->sequence = sequence_.fetch_add(1, std::memory_order_acq_rel);
-            packet->payload.assign(receive_buffer_.begin(), receive_buffer_.begin() + bytesReceived);
+            packet->payload.assign(buffer->begin(), buffer->begin() + bytesReceived);
             callback(packet);
 
-            StartReadLoop();
+            StartReadLoop(socket, buffer);
         });
+#endif
+}
+
+void TcpProtocolService::RemoveCaptureSocket(
+    const std::shared_ptr<boost::asio::ip::tcp::socket>& socket) {
+#if RECPLAY_HAS_BOOST_ASIO
+    if (!socket) {
+        return;
+    }
+
+    boost::system::error_code ec;
+    socket->cancel(ec);
+    socket->close(ec);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    capture_sockets_.erase(
+        std::remove(capture_sockets_.begin(), capture_sockets_.end(), socket),
+        capture_sockets_.end());
+#else
+    (void)socket;
 #endif
 }
 
@@ -304,7 +420,7 @@ void TcpProtocolService::ResetIoRuntimeIfUnused() {
     std::thread threadToJoin;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (acceptor_ || capture_socket_ || replay_socket_) {
+        if (acceptor_ || !capture_sockets_.empty() || replay_socket_) {
             return;
         }
         if (work_guard_) {
@@ -316,11 +432,17 @@ void TcpProtocolService::ResetIoRuntimeIfUnused() {
         if (io_thread_.joinable()) {
             threadToJoin = std::move(io_thread_);
         }
-        work_guard_.reset();
-        io_context_.reset();
     }
     if (threadToJoin.joinable()) {
         threadToJoin.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (acceptor_ || !capture_sockets_.empty() || replay_socket_) {
+            return;
+        }
+        work_guard_.reset();
+        io_context_.reset();
     }
 #endif
 }

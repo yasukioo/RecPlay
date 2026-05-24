@@ -12,6 +12,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -19,7 +20,9 @@ namespace recplay {
 
 class StatsCollector final : public IStatsService {
 public:
-    StatsCollector();
+    using CpuUsageSampler = std::function<std::optional<double>()>;
+
+    explicit StatsCollector(CpuUsageSampler cpuUsageSampler = {});
     ~StatsCollector() override;
 
     StatsSnapshot GetSnapshot() const override;
@@ -50,6 +53,7 @@ private:
     void RunAggregator();
     StatsSnapshot BuildSnapshotViewLocked(double intervalSeconds,
                                          bool preserveLastWindowWhenIdle) const;
+    void RefreshCpuUsageLocked();
     void ResetDeltasLocked();
     static double ComputeDropRate(uint64_t deltaPackets, uint64_t deltaDrops);
     static double ComputeP99Locked(const std::deque<double>& latencies);
@@ -63,6 +67,7 @@ private:
     std::thread worker_;
     std::chrono::steady_clock::time_point last_flush_at_;
     StatsSnapshot snapshot_;
+    CpuUsageSampler cpu_usage_sampler_;
     std::vector<std::function<void(const StatsSnapshot&)>> callbacks_;
 
     uint64_t total_packets_ = 0;

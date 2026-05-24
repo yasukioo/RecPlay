@@ -5,6 +5,11 @@
 
 namespace recplay {
 
+void StorageService::SetCodecService(ICodecService* codec) {
+    writer_.SetCodecService(codec);
+    reader_.SetCodecService(codec);
+}
+
 bool StorageService::CreateFile(const std::string& path,
                                 const std::vector<ChannelInfo>& channels,
                                 const std::string& codec) {

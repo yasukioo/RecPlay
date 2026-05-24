@@ -13,8 +13,10 @@
 
 namespace recplay {
 
+class ICodecService;
 class RpcapReader final {
 public:
+    void SetCodecService(ICodecService* codec);
     bool Open(const std::string& path);
     void Close();
     bool SeekTo(uint64_t timestamp_ns);
@@ -45,6 +47,7 @@ private:
     std::vector<PacketPtr> current_chunk_;
     size_t current_chunk_index_ = 0;
     uint64_t next_chunk_offset_ = 0;
+    ICodecService* codec_service_ = nullptr;
 };
 
 } // namespace recplay
