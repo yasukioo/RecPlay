@@ -16,8 +16,7 @@
   },
   "bundles": {
     "search_paths": [
-      "bundles",
-      "build/bundles"
+      "bundles"
     ],
     "auto_start": [
       "recplay_core",

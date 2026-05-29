@@ -1,0 +1,5 @@
+@echo off
+setlocal
+set "PATH=@_recplay_rcc_vcpkg_bin@;%PATH%"
+call "@_recplay_rcc_executable@" %*
+exit /b %ERRORLEVEL%

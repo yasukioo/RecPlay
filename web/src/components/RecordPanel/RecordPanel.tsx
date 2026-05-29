@@ -5,8 +5,10 @@ import {
   startRecording,
   stopRecording,
 } from "../../api/client";
-import { getTranslations } from "../../i18n";
+import { formatSessionStateLabel, getTranslations } from "../../i18n";
 import { useLocaleStore } from "../../stores/localeStore";
+import { useSessionStore } from "../../stores/sessionStore";
+import type { SessionState } from "../../types";
 
 interface RecordPanelProps {
   onError: (message: string | null) => void;
@@ -14,10 +16,13 @@ interface RecordPanelProps {
 
 export function RecordPanel({ onError }: RecordPanelProps) {
   const locale = useLocaleStore((s) => s.locale);
+  const state = useSessionStore((s) => s.state);
   const [outputPath, setOutputPath] = useState("capture.rpcap");
   const [protocols, setProtocols] = useState("UDP,TCP");
   const [busy, setBusy] = useState(false);
   const t = getTranslations(locale);
+  const statusClasses = getRecordStatusClasses(state);
+  const panelClasses = getRecordPanelClasses(state);
 
   const run = async (operation: () => Promise<unknown>) => {
     try {
@@ -32,8 +37,20 @@ export function RecordPanel({ onError }: RecordPanelProps) {
   };
 
   return (
-    <div className="p-4 bg-hmi-surface rounded border border-hmi-border space-y-3">
+    <div className={panelClasses}>
       <h3 className="text-sm font-bold text-hmi-accent uppercase tracking-wide">{t.recordPanel.title}</h3>
+
+      <div
+        role="status"
+        aria-live="polite"
+        className={`flex items-center justify-between gap-3 rounded border px-3 py-2 text-sm ${statusClasses}`}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span aria-hidden="true" className="h-2.5 w-2.5 rounded-full bg-current" />
+          <span className="text-xs uppercase tracking-wide opacity-80">{t.sessionInfo.state}</span>
+        </div>
+        <span className="truncate font-semibold">{formatSessionStateLabel(state, locale)}</span>
+      </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <label className="space-y-1">
@@ -97,4 +114,34 @@ export function RecordPanel({ onError }: RecordPanelProps) {
       </div>
     </div>
   );
+}
+
+function getRecordPanelClasses(state: SessionState): string {
+  switch (state) {
+    case "Recording":
+      return "space-y-3 rounded border border-hmi-danger/40 bg-hmi-surface p-4 shadow-[0_0_0_1px_rgba(239,83,80,0.08)]";
+    case "RecordingPaused":
+      return "space-y-3 rounded border border-hmi-warning/40 bg-hmi-surface p-4 shadow-[0_0_0_1px_rgba(255,167,38,0.08)]";
+    default:
+      return "space-y-3 rounded border border-hmi-border bg-hmi-surface p-4";
+  }
+}
+
+function getRecordStatusClasses(state: SessionState): string {
+  switch (state) {
+    case "Recording":
+      return "border-hmi-danger/40 bg-hmi-danger/10 text-hmi-danger";
+    case "RecordingPaused":
+      return "border-hmi-warning/40 bg-hmi-warning/10 text-hmi-warning";
+    case "Playing":
+    case "PlaybackPaused":
+    case "PlayingPaused":
+    case "Seeking":
+      return "border-hmi-accent/40 bg-hmi-accent/10 text-hmi-accent";
+    case "Idle":
+      return "border-hmi-success/30 bg-hmi-success/10 text-hmi-success";
+    case "Unknown":
+    default:
+      return "border-hmi-border bg-hmi-surface-alt text-hmi-text-muted";
+  }
 }

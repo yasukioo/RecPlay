@@ -139,6 +139,26 @@ void TestCpuUsageSamplerFeedsSnapshots() {
            "expected injected cpu usage percent to be forwarded");
 }
 
+void TestOnUpdateKeepsOnlyRecentCallbacks() {
+    StatsCollector collector;
+    std::atomic<uint64_t> fired{0};
+
+    for (int i = 0; i < 20; ++i) {
+        collector.OnUpdate([&, i](const StatsSnapshot&) {
+            if (i >= 4) {
+                fired.fetch_add(1, std::memory_order_acq_rel);
+            }
+        });
+    }
+
+    const uint64_t before = fired.load(std::memory_order_acquire);
+    collector.RecordPacket("UDP", 1, 1024);
+    WaitForSnapshot(collector, fired, before, std::chrono::milliseconds(500));
+
+    Expect(fired.load(std::memory_order_acquire) >= 16,
+           "collector should retain only the most recent callback registrations");
+}
+
 } // namespace
 
 int main() {
@@ -147,6 +167,7 @@ int main() {
         TestThroughputResetsBetweenWindows();
         TestGetSnapshotIncludesPendingStatsBeforeFlush();
         TestCpuUsageSamplerFeedsSnapshots();
+        TestOnUpdateKeepsOnlyRecentCallbacks();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

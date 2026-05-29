@@ -29,24 +29,47 @@ bool IsBuildConfigDirectoryName(const std::filesystem::path& path) {
 
 } // namespace
 
+std::filesystem::path ResolveBundleBaseRoot(
+    const std::filesystem::path& configPath,
+    const std::filesystem::path& processRoot) {
+    const bool hasConfigDirectory = IsBuildConfigDirectoryName(processRoot);
+    if (hasConfigDirectory) {
+        return processRoot.parent_path();
+    }
+
+    if (!configPath.empty()) {
+        const auto configDirectory = configPath.parent_path();
+        if (!configDirectory.empty()) {
+            return configDirectory;
+        }
+    }
+
+    return processRoot;
+}
+
 std::vector<std::filesystem::path> ResolveBundleSearchRoots(
     const std::vector<std::string>& rawPaths,
-    const std::filesystem::path&,
+    const std::filesystem::path& configPath,
     const std::filesystem::path& processRoot) {
     std::vector<std::filesystem::path> resolved;
     resolved.reserve(rawPaths.size());
     const bool hasConfigDirectory = IsBuildConfigDirectoryName(processRoot);
-    const auto baseRoot = hasConfigDirectory ? processRoot.parent_path() : processRoot;
+    const auto baseRoot = ResolveBundleBaseRoot(configPath, processRoot);
 
     for (const auto& rawPath : rawPaths) {
         auto root = std::filesystem::path(rawPath);
         if (root.is_relative()) {
             if (root == std::filesystem::path("bundles") && hasConfigDirectory) {
-                const auto configScoped = baseRoot / "bundles" / processRoot.filename();
-                if (std::filesystem::exists(configScoped) && std::filesystem::is_directory(configScoped)) {
-                    root = configScoped;
+                const auto localBundles = processRoot / "bundles";
+                if (std::filesystem::exists(localBundles) && std::filesystem::is_directory(localBundles)) {
+                    root = localBundles;
                 } else {
-                    root = baseRoot / root;
+                    const auto configScoped = baseRoot / "bundles" / processRoot.filename();
+                    if (std::filesystem::exists(configScoped) && std::filesystem::is_directory(configScoped)) {
+                        root = configScoped;
+                    } else {
+                        root = baseRoot / root;
+                    }
                 }
             } else {
                 root = baseRoot / root;

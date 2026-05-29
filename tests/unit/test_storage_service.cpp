@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -72,6 +73,25 @@ MutablePacketPtr MakePacket() {
     packet->payload = {0x10, 0x20, 0x30, 0x40, 0x50};
     packet->topic = "demo/topic";
     return packet;
+}
+
+MutablePacketPtr MakePacketAt(uint64_t captureTime, uint16_t flags = recplay::kFlagNone) {
+    auto packet = std::make_shared<Packet>();
+    packet->t_capture = captureTime;
+    packet->t_origin = captureTime;
+    packet->t_record = captureTime;
+    packet->channel_id = 7;
+    packet->sequence = 11;
+    packet->protocol_id = 2;
+    packet->flags = flags;
+    return packet;
+}
+
+void WriteRawFile(const std::filesystem::path& path, const recplay::RpcapHeader& header) {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    Expect(file.is_open(), "should open rpcap file for write");
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    Expect(file.good(), "should write rpcap header");
 }
 
 void TestRoundTripUsesConfiguredCodec() {
@@ -191,6 +211,219 @@ void TestVersionOneFilesRemainReadableWithoutCodec() {
     std::filesystem::remove(path);
 }
 
+void TestOversizedSchemaIsRejected() {
+    const auto path = MakeTempPath("recplay-storage-oversized-schema");
+    std::filesystem::remove(path);
+
+    recplay::RpcapHeader header{};
+    header.version = 1;
+    header.schema_offset = sizeof(header);
+    WriteRawFile(path, header);
+
+    {
+        std::ofstream file(path, std::ios::binary | std::ios::app);
+        const uint64_t schema_size = std::numeric_limits<uint64_t>::max();
+        file.write(reinterpret_cast<const char*>(&schema_size), sizeof(schema_size));
+        Expect(file.good(), "should write oversized schema size");
+    }
+
+    StorageService reader;
+    bool threw = false;
+    bool opened = false;
+    try {
+        opened = reader.OpenFile(path.string());
+    } catch (...) {
+        threw = true;
+    }
+
+    Expect(!threw, "reader should reject oversized schema without throwing");
+    Expect(!opened, "reader should reject oversized schema");
+
+    std::filesystem::remove(path);
+}
+
+void TestInvalidSchemaJsonIsRejected() {
+    const auto path = MakeTempPath("recplay-storage-invalid-schema");
+    std::filesystem::remove(path);
+
+    recplay::RpcapHeader header{};
+    header.version = 1;
+    header.schema_offset = sizeof(header);
+    WriteRawFile(path, header);
+
+    const std::string schema = "{bad json";
+    {
+        std::ofstream file(path, std::ios::binary | std::ios::app);
+        const uint64_t schema_size = static_cast<uint64_t>(schema.size());
+        file.write(reinterpret_cast<const char*>(&schema_size), sizeof(schema_size));
+        file.write(schema.data(), static_cast<std::streamsize>(schema.size()));
+        Expect(file.good(), "should write invalid schema payload");
+    }
+
+    StorageService reader;
+    bool threw = false;
+    bool opened = false;
+    try {
+        opened = reader.OpenFile(path.string());
+    } catch (...) {
+        threw = true;
+    }
+
+    Expect(!threw, "reader should reject invalid schema JSON without throwing");
+    Expect(!opened, "reader should reject invalid schema JSON");
+
+    std::filesystem::remove(path);
+}
+
+void TestOversizedFooterCountIsRejected() {
+    const auto path = MakeTempPath("recplay-storage-oversized-footer");
+    std::filesystem::remove(path);
+
+    recplay::RpcapHeader header{};
+    header.version = 1;
+    header.schema_offset = sizeof(header);
+    const std::string schema = "[]";
+    header.first_chunk_offset = header.schema_offset + sizeof(uint64_t) + schema.size();
+    header.index_footer_offset = header.first_chunk_offset;
+    WriteRawFile(path, header);
+
+    {
+        std::ofstream file(path, std::ios::binary | std::ios::app);
+        const uint64_t schema_size = static_cast<uint64_t>(schema.size());
+        file.write(reinterpret_cast<const char*>(&schema_size), sizeof(schema_size));
+        file.write(schema.data(), static_cast<std::streamsize>(schema.size()));
+        const uint64_t footer_count = std::numeric_limits<uint64_t>::max();
+        file.write(reinterpret_cast<const char*>(&footer_count), sizeof(footer_count));
+        Expect(file.good(), "should write oversized footer count");
+    }
+
+    StorageService reader;
+    bool threw = false;
+    bool opened = false;
+    try {
+        opened = reader.OpenFile(path.string());
+    } catch (...) {
+        threw = true;
+    }
+
+    Expect(!threw, "reader should reject oversized footer count without throwing");
+    Expect(!opened, "reader should reject oversized footer count");
+
+    std::filesystem::remove(path);
+}
+
+void TestOversizedChunkPayloadIsRejected() {
+    const auto path = MakeTempPath("recplay-storage-oversized-payload");
+    std::filesystem::remove(path);
+
+    recplay::RpcapHeader header{};
+    header.version = 1;
+    header.schema_offset = sizeof(header);
+    const std::string schema = "[]";
+    header.first_chunk_offset = header.schema_offset + sizeof(uint64_t) + schema.size();
+    header.index_footer_offset = header.first_chunk_offset + (sizeof(uint64_t) * 3);
+    WriteRawFile(path, header);
+
+    {
+        std::ofstream file(path, std::ios::binary | std::ios::app);
+        const uint64_t schema_size = static_cast<uint64_t>(schema.size());
+        file.write(reinterpret_cast<const char*>(&schema_size), sizeof(schema_size));
+        file.write(schema.data(), static_cast<std::streamsize>(schema.size()));
+
+        const uint64_t chunk_id = 0;
+        const uint64_t packet_count = 1;
+        const uint64_t payload_size = std::numeric_limits<uint64_t>::max();
+        const uint64_t footer_count = 0;
+        file.write(reinterpret_cast<const char*>(&chunk_id), sizeof(chunk_id));
+        file.write(reinterpret_cast<const char*>(&packet_count), sizeof(packet_count));
+        file.write(reinterpret_cast<const char*>(&payload_size), sizeof(payload_size));
+        file.write(reinterpret_cast<const char*>(&footer_count), sizeof(footer_count));
+        Expect(file.good(), "should write oversized chunk payload");
+    }
+
+    StorageService reader;
+    Expect(reader.OpenFile(path.string()), "reader should open file with oversized chunk payload");
+
+    bool threw = false;
+    bool readPacket = false;
+    try {
+        readPacket = reader.ReadNext() != nullptr;
+    } catch (...) {
+        threw = true;
+    }
+
+    Expect(!threw, "reader should reject oversized chunk payload without throwing");
+    Expect(!readPacket, "reader should reject oversized chunk payload");
+
+    reader.CloseFile();
+    std::filesystem::remove(path);
+}
+
+void TestKeyframeIntervalIsIndependentOfChunkCount() {
+    const auto path = MakeTempPath("recplay-storage-keyframe-interval");
+    std::filesystem::remove(path);
+
+    StorageService writer;
+    const std::vector<recplay::ChannelInfo> channels{{
+        7,
+        "demo-channel",
+        "TCP",
+        "demo/topic",
+        {}
+    }};
+
+    Expect(writer.CreateFile(path.string(), channels, "fake"), "writer should create file");
+    Expect(writer.WritePacket(MakePacketAt(0, recplay::kFlagNone)), "writer should accept first packet");
+    Expect(writer.WritePacket(MakePacketAt(1'100'000'000ULL, recplay::kFlagNone)),
+           "writer should accept second packet");
+    Expect(writer.WritePacket(MakePacketAt(2'200'000'000ULL, recplay::kFlagNone)),
+           "writer should accept third packet");
+    Expect(writer.WritePacket(MakePacketAt(3'300'000'000ULL, recplay::kFlagNone)),
+           "writer should accept fourth packet");
+    Expect(writer.FinalizeFile(), "writer should finalize file");
+
+    StorageService reader;
+    Expect(reader.OpenFile(path.string()), "reader should open keyframe test file");
+    const auto timestamps = reader.GetKeyframeTimestamps();
+    Expect(timestamps.size() == 4, "keyframe interval should not depend on footer count");
+    Expect(timestamps[0] == 0, "first keyframe timestamp should be zero");
+    Expect(timestamps[1] == 1'100'000'000ULL, "second keyframe should start at 1.1s");
+    Expect(timestamps[2] == 2'200'000'000ULL, "third keyframe should start at 2.2s");
+    Expect(timestamps[3] == 3'300'000'000ULL, "fourth keyframe should start at 3.3s");
+
+    reader.CloseFile();
+    std::filesystem::remove(path);
+}
+
+void TestStorageServiceTracksReadWriteStateAcrossLifecycle() {
+    const auto path = MakeTempPath("recplay-storage-state-flags");
+    std::filesystem::remove(path);
+
+    StorageService storage;
+    const std::vector<recplay::ChannelInfo> channels{{
+        7,
+        "demo-channel",
+        "TCP",
+        "demo/topic",
+        {}
+    }};
+
+    Expect(storage.CreateFile(path.string(), channels, "none"), "storage should create file");
+    Expect(storage.IsWriting(), "storage should report writing after create");
+    Expect(storage.WritePacket(MakePacket()), "storage should accept packet while writing");
+    Expect(storage.FinalizeFile(), "storage should finalize file");
+    Expect(!storage.IsWriting(), "storage should clear writing state after finalize");
+
+    Expect(storage.OpenFile(path.string()), "storage should open file for reading");
+    Expect(storage.IsReading(), "storage should report reading after open");
+    Expect(storage.HasMore(), "storage should report remaining packets after open");
+    Expect(storage.ReadNext() != nullptr, "storage should read first packet");
+    storage.CloseFile();
+    Expect(!storage.IsReading(), "storage should clear reading state after close");
+
+    std::filesystem::remove(path);
+}
+
 } // namespace
 
 int main() {
@@ -198,6 +431,12 @@ int main() {
         TestRoundTripUsesConfiguredCodec();
         TestCompressedFileRequiresMatchingCodec();
         TestVersionOneFilesRemainReadableWithoutCodec();
+        TestOversizedSchemaIsRejected();
+        TestInvalidSchemaJsonIsRejected();
+        TestOversizedFooterCountIsRejected();
+        TestOversizedChunkPayloadIsRejected();
+        TestKeyframeIntervalIsIndependentOfChunkCount();
+        TestStorageServiceTracksReadWriteStateAcrossLifecycle();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

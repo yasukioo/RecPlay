@@ -24,7 +24,8 @@ public:
     virtual void ResumeRecording() = 0;
     virtual void StopRecording() = 0;
 
-    virtual bool OpenForPlayback(const std::string& filePath) = 0;
+    virtual bool OpenForPlayback(const std::string& filePath,
+                                 const std::string& replayConfigJson = "{}") = 0;
     virtual void Play(double speed = 1.0) = 0;
     virtual void Pause() = 0;
     virtual void SeekTo(uint64_t timestamp_ns) = 0;

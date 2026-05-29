@@ -33,6 +33,9 @@ project(RecPlay VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>)
 add_compile_definitions(_WIN32_WINNT=0x0601)
 enable_testing()
 
@@ -45,6 +48,32 @@ find_package(nlohmann_json QUIET)
 find_package(spdlog QUIET)
 find_package(zstd QUIET)
 find_package(Drogon QUIET)
+
+if(WIN32 AND TARGET usResourceCompiler AND DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+    get_target_property(_recplay_rcc_executable usResourceCompiler IMPORTED_LOCATION_DEBUG)
+    if(NOT _recplay_rcc_executable OR _recplay_rcc_executable MATCHES "-NOTFOUND$")
+        get_target_property(_recplay_rcc_executable usResourceCompiler IMPORTED_LOCATION_RELEASE)
+    endif()
+
+    if(_recplay_rcc_executable AND NOT _recplay_rcc_executable MATCHES "-NOTFOUND$")
+        set(_recplay_rcc_wrapper "${CMAKE_BINARY_DIR}/recplay_usResourceCompiler.cmd")
+        file(TO_NATIVE_PATH "${_recplay_rcc_executable}" _recplay_rcc_executable)
+        file(TO_NATIVE_PATH "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin" _recplay_rcc_vcpkg_bin)
+        configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/usResourceCompiler-wrapper.cmd.in
+            ${_recplay_rcc_wrapper}
+            @ONLY
+        )
+        foreach(_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+            set_target_properties(usResourceCompiler PROPERTIES
+                IMPORTED_LOCATION_${_config} "${_recplay_rcc_wrapper}"
+            )
+        endforeach()
+        set_target_properties(usResourceCompiler PROPERTIES
+            IMPORTED_LOCATION "${_recplay_rcc_wrapper}"
+        )
+    endif()
+endif()
 
 add_library(recplay_interfaces INTERFACE)
 target_include_directories(recplay_interfaces
@@ -108,6 +137,9 @@ add_subdirectory(bundles/codec_zstd)
 add_executable(recplay
     main.cpp
     BundlePathResolver.cpp
+)
+set_target_properties(recplay PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>
 )
 target_link_libraries(recplay
     PRIVATE

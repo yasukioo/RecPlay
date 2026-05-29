@@ -66,10 +66,9 @@ private:
     static std::string EscapeJsonString(const std::string& value);
     static std::string ExtractJsonNumberLiteral(const std::string& body, const std::string& key);
     static std::string ExtractJsonStringLiteral(const std::string& body, const std::string& key);
+    static std::string ExtractJsonObjectLiteral(const std::string& body, const std::string& key);
 
     std::atomic<bool> running_{false};
-    std::atomic<bool> restart_blocked_{false};
-    bool drogon_configured_ = false;
     std::thread server_thread_;
     std::atomic<ISessionService*> session_{nullptr};
     std::atomic<IStatsService*> stats_{nullptr};

@@ -5,11 +5,52 @@
 
 #include "HttpServer.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <cwctype>
 #include <sstream>
 
 namespace recplay {
+
+namespace {
+
+constexpr std::uintmax_t kMaxStaticFileBytes = 16ull * 1024ull * 1024ull;
+
+bool IsPathWithinRoot(const std::filesystem::path& root, const std::filesystem::path& candidate) {
+#if defined(_WIN32)
+    const auto rootValue = root.native();
+    const auto candidateValue = candidate.native();
+    if (candidateValue.size() < rootValue.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < rootValue.size(); ++i) {
+        if (std::towlower(rootValue[i]) != std::towlower(candidateValue[i])) {
+            return false;
+        }
+    }
+    if (candidateValue.size() == rootValue.size()) {
+        return true;
+    }
+    const auto separator = candidateValue[rootValue.size()];
+    return separator == L'\\' || separator == L'/';
+#else
+    const auto rootValue = root.native();
+    const auto candidateValue = candidate.native();
+    if (candidateValue.size() < rootValue.size()) {
+        return false;
+    }
+    if (candidateValue.compare(0, rootValue.size(), rootValue) != 0) {
+        return false;
+    }
+    if (candidateValue.size() == rootValue.size()) {
+        return true;
+    }
+    return candidateValue[rootValue.size()] == '/';
+#endif
+}
+
+} // namespace
 
 bool StaticFileHandler::SetRoot(const std::string& root) {
     if (root.empty()) {
@@ -48,6 +89,18 @@ HttpResponse StaticFileHandler::Handle(const std::string& path) const {
     };
 
     auto serveFile = [&](const std::filesystem::path& filePath) -> HttpResponse {
+        std::error_code fileSizeError;
+        const auto fileSize = std::filesystem::file_size(filePath, fileSizeError);
+        if (fileSizeError) {
+            return HttpResponse{404, "application/json", "{\"error\":\"Not Found\"}"};
+        }
+        if (fileSize > kMaxStaticFileBytes) {
+            return HttpResponse{
+                413,
+                "application/json",
+                "{\"error\":\"Static file exceeds size limit\"}"};
+        }
+
         std::ifstream input(filePath, std::ios::binary);
         if (!input) {
             return HttpResponse{404, "application/json", "{\"error\":\"Not Found\"}"};
@@ -60,13 +113,7 @@ HttpResponse StaticFileHandler::Handle(const std::string& path) const {
 
     const auto requestedPath = resolvePath(normalized);
     if (!ec && !requestedPath.empty()) {
-        const auto rootPathString = rootPath.string();
-        const auto requestedPathString = requestedPath.string();
-        const bool insideRoot =
-            requestedPathString.size() >= rootPathString.size() &&
-            requestedPathString.compare(0, rootPathString.size(), rootPathString) == 0;
-
-        if (insideRoot && std::filesystem::exists(requestedPath) &&
+        if (IsPathWithinRoot(rootPath, requestedPath) && std::filesystem::exists(requestedPath) &&
             std::filesystem::is_regular_file(requestedPath)) {
             return serveFile(requestedPath);
         }

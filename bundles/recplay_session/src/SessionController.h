@@ -6,6 +6,7 @@
 #include "ISessionService.h"
 #include "SessionStateMachine.h"
 
+#include <atomic>
 #include <mutex>
 #include <memory>
 #include <string>
@@ -25,7 +26,8 @@ public:
     void PauseRecording() override;
     void ResumeRecording() override;
     void StopRecording() override;
-    bool OpenForPlayback(const std::string& filePath) override;
+    bool OpenForPlayback(const std::string& filePath,
+                         const std::string& replayConfigJson = "{}") override;
     void Play(double speed = 1.0) override;
     void Pause() override;
     void SeekTo(uint64_t timestamp_ns) override;
@@ -48,10 +50,10 @@ private:
     CoreEngine* engine_ = nullptr;
     mutable std::mutex mutex_;
     SessionStateMachine machine_;
-    StateCallback state_cb_;
+    std::vector<StateCallback> state_callbacks_;
     uint64_t duration_ns_ = 0;
     uint64_t current_position_ns_ = 0;
-    double current_speed_ = 1.0;
+    std::atomic<double> current_speed_{1.0};
     uint64_t loop_start_ns_ = 0;
     uint64_t loop_end_ns_ = 0;
     std::vector<std::string> active_record_protocols_;

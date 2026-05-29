@@ -60,6 +60,7 @@ private:
 
     static constexpr std::chrono::milliseconds kAggregationInterval{100};
     static constexpr size_t kLatencyWindowSize = 256;
+    static constexpr size_t kMaxCallbacks = 16;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

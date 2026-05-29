@@ -105,6 +105,14 @@ bool TcpProtocolService::StartCapture(const std::string& configJson, PacketCallb
             capture_epoch_ns_.store(GetSteadyClockNanoseconds(), std::memory_order_release);
         }
 
+        if (startIoThread) {
+            io_thread_ = std::thread([activeIoContext] {
+                if (activeIoContext) {
+                    activeIoContext->run();
+                }
+            });
+        }
+
         if (config.mode == "server") {
             acceptor_ = std::make_unique<boost::asio::ip::tcp::acceptor>(
                 *activeIoContext,
@@ -114,24 +122,24 @@ bool TcpProtocolService::StartCapture(const std::string& configJson, PacketCallb
             StartAcceptLoop();
         } else {
             auto socket = std::make_shared<boost::asio::ip::tcp::socket>(*activeIoContext);
-            socket->connect(boost::asio::ip::tcp::endpoint(
-                boost::asio::ip::make_address(config.host),
-                config.port));
             auto buffer = std::make_shared<std::array<uint8_t, 65536>>();
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 capture_sockets_.push_back(socket);
             }
-            StartReadLoop(socket, buffer);
+            socket->async_connect(
+                boost::asio::ip::tcp::endpoint(
+                    boost::asio::ip::make_address(config.host),
+                    config.port),
+                [this, socket, buffer](const boost::system::error_code& error) {
+                    if (error) {
+                        RemoveCaptureSocket(socket);
+                        return;
+                    }
+                    StartReadLoop(socket, buffer);
+                });
         }
 
-        if (startIoThread) {
-            io_thread_ = std::thread([this] {
-                if (io_context_) {
-                    io_context_->run();
-                }
-            });
-        }
         return true;
     } catch (...) {
         StopCapture();
@@ -166,10 +174,9 @@ void TcpProtocolService::StopCapture() {
         socket->close(ec);
     }
     ResetIoRuntimeIfUnused();
-#endif
-
     std::lock_guard<std::mutex> lock(mutex_);
     capture_epoch_ns_.store(0, std::memory_order_release);
+#endif
 }
 
 bool TcpProtocolService::IsCapturing() const {
@@ -188,7 +195,8 @@ bool TcpProtocolService::StartReplay(const std::string& configJson) {
     return false;
 #else
     try {
-        std::unique_ptr<boost::asio::ip::tcp::socket> socket;
+        boost::asio::io_context* activeIoContext = nullptr;
+        bool startIoThread = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!io_context_) {
@@ -196,15 +204,24 @@ bool TcpProtocolService::StartReplay(const std::string& configJson) {
                 work_guard_ = std::make_unique<
                     boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
                     boost::asio::make_work_guard(*io_context_));
-                io_thread_ = std::thread([this] {
-                    if (io_context_) {
-                        io_context_->run();
-                    }
-                });
+                startIoThread = true;
             }
-
-            socket = std::make_unique<boost::asio::ip::tcp::socket>(*io_context_);
+            activeIoContext = io_context_.get();
         }
+
+        if (activeIoContext == nullptr) {
+            return false;
+        }
+
+        if (startIoThread) {
+            io_thread_ = std::thread([activeIoContext] {
+                if (activeIoContext) {
+                    activeIoContext->run();
+                }
+            });
+        }
+ 
+        auto socket = std::make_unique<boost::asio::ip::tcp::socket>(*activeIoContext);
 
         socket->connect(boost::asio::ip::tcp::endpoint(
             boost::asio::ip::make_address(config.host),
@@ -295,14 +312,18 @@ bool TcpProtocolService::LoadConfig(const std::string& configJson, RuntimeConfig
     (void)config;
     return false;
 #else
-    const auto json = nlohmann::json::parse(configJson.empty() ? "{}" : configJson);
-    config.mode = json.value("mode", config.mode);
-    config.host = json.value("host", config.host);
-    config.port = static_cast<unsigned short>(json.value("port", static_cast<int>(config.port)));
-    config.channel_id = json.value("channel_id", config.channel_id);
-    config.channel_name = json.value("channel_name", config.channel_name);
-    config.topic = json.value("topic", config.topic);
-    return true;
+    try {
+        const auto json = nlohmann::json::parse(configJson.empty() ? "{}" : configJson);
+        config.mode = json.value("mode", config.mode);
+        config.host = json.value("host", config.host);
+        config.port = static_cast<unsigned short>(json.value("port", static_cast<int>(config.port)));
+        config.channel_id = json.value("channel_id", config.channel_id);
+        config.channel_name = json.value("channel_name", config.channel_name);
+        config.topic = json.value("topic", config.topic);
+        return true;
+    } catch (...) {
+        return false;
+    }
 #endif
 }
 
@@ -343,10 +364,10 @@ void TcpProtocolService::StartAcceptLoop() {
 #endif
 }
 
+#if RECPLAY_HAS_BOOST_ASIO
 void TcpProtocolService::StartReadLoop(
     const std::shared_ptr<boost::asio::ip::tcp::socket>& socket,
     const std::shared_ptr<std::array<uint8_t, 65536>>& buffer) {
-#if RECPLAY_HAS_BOOST_ASIO
     if (!socket || !buffer) {
         return;
     }
@@ -392,12 +413,10 @@ void TcpProtocolService::StartReadLoop(
 
             StartReadLoop(socket, buffer);
         });
-#endif
 }
 
 void TcpProtocolService::RemoveCaptureSocket(
     const std::shared_ptr<boost::asio::ip::tcp::socket>& socket) {
-#if RECPLAY_HAS_BOOST_ASIO
     if (!socket) {
         return;
     }
@@ -410,10 +429,14 @@ void TcpProtocolService::RemoveCaptureSocket(
     capture_sockets_.erase(
         std::remove(capture_sockets_.begin(), capture_sockets_.end(), socket),
         capture_sockets_.end());
-#else
-    (void)socket;
-#endif
+    if (capture_sockets_.empty() && !acceptor_) {
+        capturing_ = false;
+        capture_callback_ = {};
+        channels_.clear();
+        capture_epoch_ns_.store(0, std::memory_order_release);
+    }
 }
+#endif
 
 void TcpProtocolService::ResetIoRuntimeIfUnused() {
 #if RECPLAY_HAS_BOOST_ASIO

@@ -30,7 +30,12 @@ export function SessionInfo() {
   const formatNs = (ns: number) => `${(ns / 1_000_000_000).toFixed(2)}s`;
 
   const isRecording = state === "Recording" || state === "RecordingPaused";
-  const isPlaying = state === "Playing" || state === "PlayingPaused";
+  const isPlaying =
+    state === "Playing" ||
+    state === "PlaybackPaused" ||
+    state === "PlayingPaused" ||
+    state === "Seeking" ||
+    state === "Stopped";
 
   return (
     <aside className={layoutClassName}>

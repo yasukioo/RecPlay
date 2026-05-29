@@ -10,6 +10,13 @@
 #include <cctype>
 #include <utility>
 
+#if __has_include(<spdlog/spdlog.h>)
+#include <spdlog/spdlog.h>
+#define RECPLAY_HAS_SPDLOG 1
+#else
+#define RECPLAY_HAS_SPDLOG 0
+#endif
+
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
 #define RECPLAY_HAS_JSON 1
@@ -131,6 +138,66 @@ std::string ExtractJsonObjectLiteral(const std::string& document, const std::str
     return {};
 }
 
+std::vector<std::string> CollectReplayProtocols(const std::vector<ChannelInfo>& channels,
+                                                const std::vector<std::string>& fallbackProtocols) {
+    std::vector<std::string> protocols;
+    for (const auto& channel : channels) {
+        if (channel.protocol.empty()) {
+            continue;
+        }
+        if (std::find(protocols.begin(), protocols.end(), channel.protocol) == protocols.end()) {
+            protocols.push_back(channel.protocol);
+        }
+    }
+
+    if (protocols.empty()) {
+        for (const auto& protocol : fallbackProtocols) {
+            if (protocol.empty()) {
+                continue;
+            }
+            if (std::find(protocols.begin(), protocols.end(), protocol) == protocols.end()) {
+                protocols.push_back(protocol);
+            }
+        }
+    }
+
+    return protocols;
+}
+
+std::vector<std::string> InferReplayProtocolsFromConfig(const std::string& replayConfigJson) {
+    std::vector<std::string> protocols;
+
+#if RECPLAY_HAS_JSON
+    try {
+        const auto document = nlohmann::json::parse(replayConfigJson.empty() ? "{}" : replayConfigJson);
+        if (document.is_object() &&
+            (document.contains("address") || document.contains("interface") || document.contains("recv_buf"))) {
+            protocols.push_back("UDP");
+        } else if (document.is_object() &&
+                   (document.contains("host") || document.contains("mode"))) {
+            protocols.push_back("TCP");
+        }
+    } catch (...) {
+        return {};
+    }
+#else
+    const bool looks_like_udp =
+        replayConfigJson.find("\"address\"") != std::string::npos ||
+        replayConfigJson.find("\"interface\"") != std::string::npos ||
+        replayConfigJson.find("\"recv_buf\"") != std::string::npos;
+    const bool looks_like_tcp =
+        replayConfigJson.find("\"host\"") != std::string::npos ||
+        replayConfigJson.find("\"mode\"") != std::string::npos;
+    if (looks_like_udp) {
+        protocols.push_back("UDP");
+    } else if (looks_like_tcp) {
+        protocols.push_back("TCP");
+    }
+#endif
+
+    return protocols;
+}
+
 #if RECPLAY_HAS_JSON
 std::string ToJsonString(const nlohmann::json& value) {
     return value.dump();
@@ -192,7 +259,7 @@ SessionState SessionController::GetState() const {
 
 void SessionController::OnStateChanged(StateCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
-    state_cb_ = std::move(cb);
+    state_callbacks_.push_back(std::move(cb));
 }
 
 bool SessionController::StartRecording(const std::string& configJson) {
@@ -287,20 +354,40 @@ void SessionController::StopRecording() {
     machine_.Transition(SessionState::Stopped);
 }
 
-bool SessionController::OpenForPlayback(const std::string& filePath) {
+bool SessionController::OpenForPlayback(const std::string& filePath,
+                                       const std::string& replayConfigJson) {
     if (engine_ == nullptr) {
+#if RECPLAY_HAS_SPDLOG
+        spdlog::error("playback open failed: core engine unavailable");
+#endif
         return false;
     }
 
     auto* storage = engine_->Storage();
     if (storage == nullptr || !storage->OpenFile(filePath)) {
+#if RECPLAY_HAS_SPDLOG
+        spdlog::error("playback open failed: storage could not open file {}", filePath);
+#endif
         return false;
     }
 
-    const auto protocol_names = engine_->GetAttachedProtocolNames();
+    const std::string replay_config = replayConfigJson.empty() ? "{}" : replayConfigJson;
+    auto protocol_names = CollectReplayProtocols(storage->GetChannels(), {});
+    if (protocol_names.empty()) {
+        protocol_names = InferReplayProtocolsFromConfig(replay_config);
+    }
+    if (protocol_names.empty()) {
+        protocol_names = engine_->GetAttachedProtocolNames();
+    }
+#if RECPLAY_HAS_SPDLOG
+    spdlog::info("playback open: file={} inferred_protocols={}", filePath, protocol_names.size());
+#endif
     std::vector<std::string> replay_protocols;
     for (const auto& protocol_name : protocol_names) {
-        if (!engine_->StartProtocolReplay(protocol_name, "{}")) {
+        if (!engine_->StartProtocolReplay(protocol_name, replay_config)) {
+#if RECPLAY_HAS_SPDLOG
+            spdlog::error("playback open failed: protocol replay start failed for {}", protocol_name);
+#endif
             for (const auto& started_name : replay_protocols) {
                 engine_->StopProtocolReplay(started_name);
             }
@@ -322,11 +409,20 @@ bool SessionController::OpenForPlayback(const std::string& filePath) {
     engine_->Timeline().SetOrigin(0);
     engine_->Scheduler().Clear();
     if (!FillPlaybackQueue()) {
+#if RECPLAY_HAS_SPDLOG
+        spdlog::error("playback open failed: initial playback queue fill returned false");
+#endif
         StopReplayProtocols();
         storage->CloseFile();
         return false;
     }
 
+    // Land in the "staged / ready to play" state. After a record→stop flow the
+    // session is already Stopped, and Stopped→Stopped is not a valid transition,
+    // so treat "already Stopped" as success rather than failing the open.
+    if (machine_.GetState() == SessionState::Stopped) {
+        return true;
+    }
     return machine_.Transition(SessionState::Stopped);
 }
 
@@ -340,7 +436,7 @@ void SessionController::Play(double speed) {
         return;
     }
 
-    current_speed_ = speed;
+    current_speed_.store(speed, std::memory_order_release);
     engine_->Timeline().SetSpeed(speed);
     if (engine_->Timeline().IsPaused()) {
         engine_->Timeline().Resume();
@@ -399,12 +495,12 @@ void SessionController::SeekTo(uint64_t timestamp_ns) {
     if (previous_state == SessionState::PlaybackPaused) {
         machine_.Transition(SessionState::PlaybackPaused);
     } else {
-        Play(current_speed_);
+        Play(current_speed_.load(std::memory_order_acquire));
     }
 }
 
 void SessionController::SetSpeed(double speed) {
-    current_speed_ = speed;
+    current_speed_.store(speed, std::memory_order_release);
     if (engine_) {
         engine_->Timeline().SetSpeed(speed);
     }
@@ -453,7 +549,7 @@ uint64_t SessionController::GetCurrentPosition() const {
 }
 
 double SessionController::GetCurrentSpeed() const {
-    return current_speed_;
+    return current_speed_.load(std::memory_order_acquire);
 }
 
 void SessionController::StopRecordingProtocols() {
@@ -552,13 +648,15 @@ void SessionController::DispatchPlaybackPacket(PacketPtr pkt) {
 }
 
 void SessionController::PublishState(SessionState from, SessionState next) {
-    StateCallback callback;
+    std::vector<StateCallback> callbacks;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        callback = state_cb_;
+        callbacks = state_callbacks_;
     }
-    if (callback) {
-        callback(from, next);
+    for (const auto& callback : callbacks) {
+        if (callback) {
+            callback(from, next);
+        }
     }
 }
 

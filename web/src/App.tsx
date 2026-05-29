@@ -38,8 +38,8 @@ import { TopicMapper } from "./components/TopicMapper/TopicMapper";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { getTranslations } from "./i18n";
 import { getAppShellClasses, getPanelGridClasses } from "./layoutModel";
-import { LOCALE_STORAGE_KEY, sanitizeLocale, useLocaleStore } from "./stores/localeStore";
-import { THEME_STORAGE_KEY, sanitizeTheme, useThemeStore } from "./stores/themeStore";
+import { LOCALE_STORAGE_KEY, useLocaleStore } from "./stores/localeStore";
+import { THEME_STORAGE_KEY, useThemeStore } from "./stores/themeStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { useStatsStore } from "./stores/statsStore";
 import { usePluginStore } from "./stores/pluginStore";
@@ -68,10 +68,8 @@ export default function App() {
   const sessionState = useSessionStore((s) => s.state);
   const speed = useSessionStore((s) => s.speed);
   const locale = useLocaleStore((s) => s.locale);
-  const setLocale = useLocaleStore((s) => s.setLocale);
   const toggleLocale = useLocaleStore((s) => s.toggleLocale);
   const theme = useThemeStore((s) => s.theme);
-  const setTheme = useThemeStore((s) => s.setTheme);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const selectedPluginId = usePluginStore((s) => s.selectedPluginId);
   const plugins = usePluginStore((s) => s.plugins);
@@ -94,22 +92,6 @@ export default function App() {
         setErrorMessage(err instanceof Error ? err.message : t.errors.loadInitialData);
       });
   }, [t.errors.loadInitialData]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    setLocale(sanitizeLocale(window.localStorage.getItem(LOCALE_STORAGE_KEY)));
-  }, [setLocale]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    setTheme(sanitizeTheme(window.localStorage.getItem(THEME_STORAGE_KEY)));
-  }, [setTheme]);
 
   useEffect(() => {
     if (typeof document === "undefined") {

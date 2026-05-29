@@ -11,14 +11,14 @@ import {
 } from "./layoutModel";
 
 describe("getAppShellClasses", () => {
-  it("stacks the shell vertically on mobile and restores the three-column layout on xl screens", () => {
+  it("keeps the footer bars visible by constraining the shell to the viewport and allowing the workspace to scroll", () => {
     expect(getAppShellClasses()).toEqual({
-      app: "min-h-screen bg-hmi-bg text-hmi-text",
-      root: "flex min-h-screen flex-col",
-      main: "flex-1 overflow-y-auto xl:grid xl:grid-cols-[220px_minmax(0,1fr)_280px] xl:overflow-hidden",
-      leftRail: "border-b border-hmi-border p-2 xl:overflow-y-auto xl:border-b-0 xl:border-r",
-      center: "space-y-3 overflow-visible p-3 sm:p-4 xl:overflow-y-auto",
-      rightRail: "border-t border-hmi-border p-3 sm:p-4 xl:overflow-y-auto xl:border-t-0 xl:border-l",
+      app: "h-screen overflow-hidden bg-hmi-bg text-hmi-text",
+      root: "flex h-full min-h-0 flex-col",
+      main: "min-h-0 flex-1 overflow-y-auto xl:grid xl:grid-cols-[220px_minmax(0,1fr)_280px] xl:overflow-hidden",
+      leftRail: "min-h-0 border-b border-hmi-border p-2 xl:overflow-y-auto xl:border-b-0 xl:border-r",
+      center: "min-h-0 space-y-3 overflow-visible p-3 sm:p-4 xl:overflow-y-auto",
+      rightRail: "min-h-0 border-t border-hmi-border p-3 sm:p-4 xl:overflow-y-auto xl:border-t-0 xl:border-l",
     });
   });
 });

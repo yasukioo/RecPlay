@@ -7,6 +7,8 @@
 #include "RpcapReader.h"
 #include "RpcapWriter.h"
 
+#include <atomic>
+
 namespace recplay {
 
 class ICodecService;
@@ -35,8 +37,8 @@ public:
 private:
     RpcapWriter writer_;
     RpcapReader reader_;
-    bool writing_ = false;
-    bool reading_ = false;
+    std::atomic<bool> writing_{false};
+    std::atomic<bool> reading_{false};
 };
 
 } // namespace recplay

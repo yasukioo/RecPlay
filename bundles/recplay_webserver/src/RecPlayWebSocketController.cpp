@@ -3,19 +3,8 @@
 
 #include "RecPlayWebSocketController.h"
 
+#include "DrogonWindowsCompat.h"
 #include "WebSocketServer.h"
-
-#if defined(_WIN32)
-#include <WinSock2.h>
-#ifndef htonll
-static inline std::uint64_t recplay_htonll(std::uint64_t value) {
-    const std::uint32_t high = htonl(static_cast<std::uint32_t>(value >> 32));
-    const std::uint32_t low = htonl(static_cast<std::uint32_t>(value & 0xffffffffULL));
-    return (static_cast<std::uint64_t>(low) << 32) | high;
-}
-#define htonll recplay_htonll
-#endif
-#endif
 
 #if __has_include(<drogon/WebSocketController.h>)
 #include <drogon/WebSocketController.h>
@@ -24,20 +13,50 @@ static inline std::uint64_t recplay_htonll(std::uint64_t value) {
 #define RECPLAY_HAS_DROGON_WS 0
 #endif
 
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <unordered_set>
 
 namespace recplay {
 
+std::mutex RecPlayWebSocketController::server_mutex_;
 std::shared_ptr<WebSocketServer> RecPlayWebSocketController::server_;
 
 void RecPlayWebSocketController::SetServer(std::shared_ptr<WebSocketServer> server) {
+    std::lock_guard<std::mutex> lock(server_mutex_);
     server_ = std::move(server);
+}
+
+std::shared_ptr<WebSocketServer> RecPlayWebSocketController::GetServer() {
+    std::lock_guard<std::mutex> lock(server_mutex_);
+    return server_;
 }
 
 #if RECPLAY_HAS_DROGON_WS
 namespace {
+
+void SendWhenReady(
+    const drogon::WebSocketConnectionPtr& connection,
+    std::string message) {
+    if (!connection) {
+        return;
+    }
+
+    auto* loop = drogon::app().getLoop();
+    if (loop != nullptr) {
+        loop->runAfter(
+            std::chrono::milliseconds(10),
+            [connection, message = std::move(message)]() mutable {
+                if (connection) {
+                    connection->send(std::move(message));
+                }
+            });
+        return;
+    }
+
+    connection->send(std::move(message));
+}
 
 class DrogonRecPlayWebSocketController final
     : public drogon::WebSocketController<DrogonRecPlayWebSocketController> {
@@ -49,8 +68,20 @@ public:
 
     void handleNewConnection(const drogon::HttpRequestPtr&,
                              const drogon::WebSocketConnectionPtr& connection) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        connections_.insert(connection);
+        std::shared_ptr<WebSocketServer> server;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            connections_.insert(connection);
+            server = RecPlayWebSocketController::GetServer();
+        }
+
+        if (!connection || !server) {
+            return;
+        }
+        const auto backlog = server->GetBroadcastMessages();
+        for (const auto& message : backlog) {
+            SendWhenReady(connection, message);
+        }
     }
 
     void handleConnectionClosed(const drogon::WebSocketConnectionPtr& connection) override {
@@ -69,7 +100,7 @@ public:
         }
         for (const auto& connection : connections) {
             if (connection) {
-                connection->send(std::string(message));
+                SendWhenReady(connection, std::string(message));
             }
         }
     }

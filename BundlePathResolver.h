@@ -18,4 +18,8 @@ std::vector<std::filesystem::path> DiscoverBundleBinaryLocations(
     const std::vector<std::filesystem::path>& searchRoots,
     const std::vector<std::string>& allowedBundleNames);
 
+std::filesystem::path ResolveBundleBaseRoot(
+    const std::filesystem::path& configPath,
+    const std::filesystem::path& processRoot);
+
 } // namespace recplay

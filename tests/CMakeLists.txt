@@ -100,9 +100,139 @@ target_link_libraries(recplay_storage_tests
     PRIVATE
         recplay_interfaces
         recplay_json
+        recplay_zstd
 )
 
 add_test(NAME recplay_storage_tests COMMAND recplay_storage_tests)
+
+add_executable(recplay_ringbuffer_tests
+    unit/test_ringbuffer.cpp
+)
+
+target_include_directories(recplay_ringbuffer_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_ringbuffer_tests
+    PRIVATE
+        recplay_interfaces
+)
+
+add_test(NAME recplay_ringbuffer_tests COMMAND recplay_ringbuffer_tests)
+
+add_executable(recplay_timeline_tests
+    unit/test_timeline.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src/TimelineEngine.cpp
+)
+
+target_include_directories(recplay_timeline_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_timeline_tests
+    PRIVATE
+        recplay_interfaces
+)
+
+add_test(NAME recplay_timeline_tests COMMAND recplay_timeline_tests)
+
+add_executable(recplay_state_machine_tests
+    unit/test_state_machine.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_session/src/SessionStateMachine.cpp
+)
+
+target_include_directories(recplay_state_machine_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_session/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_state_machine_tests
+    PRIVATE
+        recplay_interfaces
+)
+
+add_test(NAME recplay_state_machine_tests COMMAND recplay_state_machine_tests)
+
+add_executable(recplay_object_pool_tests
+    unit/test_object_pool.cpp
+)
+
+target_include_directories(recplay_object_pool_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_object_pool_tests
+    PRIVATE
+        recplay_interfaces
+)
+
+add_test(NAME recplay_object_pool_tests COMMAND recplay_object_pool_tests)
+
+add_executable(recplay_index_builder_tests
+    unit/test_index_builder.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src/IndexBuilder.cpp
+)
+
+target_include_directories(recplay_index_builder_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_index_builder_tests
+    PRIVATE
+        recplay_interfaces
+)
+
+add_test(NAME recplay_index_builder_tests COMMAND recplay_index_builder_tests)
+
+add_executable(recplay_injector_tests
+    unit/test_injector.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src/InjectorBus.cpp
+)
+
+target_include_directories(recplay_injector_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_injector_tests
+    PRIVATE
+        recplay_interfaces
+        recplay_json
+)
+
+add_test(NAME recplay_injector_tests COMMAND recplay_injector_tests)
+
+add_executable(recplay_rpcap_writer_reader_tests
+    unit/test_rpcap_writer_reader.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/RpcapWriter.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/RpcapReader.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/IoBackendFactory.cpp
+)
+
+target_include_directories(recplay_rpcap_writer_reader_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_rpcap_writer_reader_tests
+    PRIVATE
+        recplay_interfaces
+        recplay_json
+        recplay_zstd
+)
+
+add_test(NAME recplay_rpcap_writer_reader_tests COMMAND recplay_rpcap_writer_reader_tests)
 
 add_executable(recplay_webserver_tests
     unit/test_http_server.cpp
@@ -168,6 +298,53 @@ target_link_libraries(recplay_websocket_transport_smoke_tests
 )
 
 add_test(NAME recplay_websocket_transport_smoke_tests COMMAND recplay_websocket_transport_smoke_tests)
+
+add_executable(recplay_record_playback_tests
+    integration/test_record_playback.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/StorageService.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/RpcapWriter.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/RpcapReader.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/IoBackendFactory.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/protocol_udp/src/UdpProtocolService.cpp
+)
+
+target_include_directories(recplay_record_playback_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src
+        ${PROJECT_SOURCE_DIR}/bundles/protocol_udp/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_record_playback_tests
+    PRIVATE
+        recplay_interfaces
+        recplay_boost_system
+        recplay_json
+        recplay_zstd
+)
+
+add_test(NAME recplay_record_playback_tests COMMAND recplay_record_playback_tests)
+
+add_executable(recplay_webserver_integration_tests
+    integration/test_webserver.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/HttpServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/StaticFileHandler.cpp
+)
+
+target_include_directories(recplay_webserver_integration_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src
+        ${PROJECT_SOURCE_DIR}/interfaces
+)
+
+target_link_libraries(recplay_webserver_integration_tests
+    PRIVATE
+        recplay_interfaces
+        recplay_json
+        recplay_drogon
+)
+
+add_test(NAME recplay_webserver_integration_tests COMMAND recplay_webserver_integration_tests)
 
 add_executable(recplay_runtime_smoke_tests
     integration/test_runtime_smoke.cpp

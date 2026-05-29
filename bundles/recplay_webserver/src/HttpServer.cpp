@@ -3,24 +3,13 @@
 
 #include "HttpServer.h"
 
+#include "DrogonWindowsCompat.h"
 #include "IRuntimeCatalog.h"
 #include "IStatsService.h"
 #include "ISessionService.h"
 #include "StaticFileHandler.h"
 
 #include <cstdint>
-
-#if defined(_WIN32)
-#include <WinSock2.h>
-#ifndef htonll
-static inline std::uint64_t recplay_htonll(std::uint64_t value) {
-    const std::uint32_t high = htonl(static_cast<std::uint32_t>(value >> 32));
-    const std::uint32_t low = htonl(static_cast<std::uint32_t>(value & 0xffffffffULL));
-    return (static_cast<std::uint64_t>(low) << 32) | high;
-}
-#define htonll recplay_htonll
-#endif
-#endif
 
 #if __has_include(<drogon/drogon.h>)
 #include <drogon/drogon.h>
@@ -38,8 +27,12 @@ static inline std::uint64_t recplay_htonll(std::uint64_t value) {
 
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
+#include <cmath>
+#include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace recplay {
 
@@ -206,6 +199,145 @@ bool TryParseUint64(const std::string& value, uint64_t* parsedValue) {
     return true;
 }
 
+double SanitizeJsonNumber(double value) {
+    return std::isfinite(value) ? value : 0.0;
+}
+
+bool AppendUtf8CodePoint(uint32_t codePoint, std::string* output) {
+    if (output == nullptr || codePoint > 0x10ffff ||
+        (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+        return false;
+    }
+
+    if (codePoint <= 0x7f) {
+        output->push_back(static_cast<char>(codePoint));
+        return true;
+    }
+    if (codePoint <= 0x7ff) {
+        output->push_back(static_cast<char>(0xc0 | (codePoint >> 6)));
+        output->push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+        return true;
+    }
+    if (codePoint <= 0xffff) {
+        output->push_back(static_cast<char>(0xe0 | (codePoint >> 12)));
+        output->push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+        output->push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+        return true;
+    }
+
+    output->push_back(static_cast<char>(0xf0 | (codePoint >> 18)));
+    output->push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3f)));
+    output->push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+    output->push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+    return true;
+}
+
+bool ReadJsonHexCodeUnit(const std::string& literal, size_t offset, uint32_t* codeUnit) {
+    if (codeUnit == nullptr || offset + 4 > literal.size()) {
+        return false;
+    }
+
+    uint32_t value = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        value <<= 4;
+        const unsigned char ch = static_cast<unsigned char>(literal[offset + i]);
+        if (ch >= '0' && ch <= '9') {
+            value |= static_cast<uint32_t>(ch - '0');
+        } else if (ch >= 'a' && ch <= 'f') {
+            value |= static_cast<uint32_t>(10 + ch - 'a');
+        } else if (ch >= 'A' && ch <= 'F') {
+            value |= static_cast<uint32_t>(10 + ch - 'A');
+        } else {
+            return false;
+        }
+    }
+
+    *codeUnit = value;
+    return true;
+}
+
+bool UnescapeJsonStringLiteral(const std::string& literal, std::string* output) {
+    if (output == nullptr) {
+        return false;
+    }
+
+#if RECPLAY_HTTP_SERVER_HAS_JSON
+    try {
+        *output = nlohmann::json::parse("\"" + literal + "\"").get<std::string>();
+        return true;
+    } catch (...) {
+    }
+#endif
+
+    output->clear();
+    for (size_t i = 0; i < literal.size(); ++i) {
+        const char ch = literal[i];
+        if (ch != '\\') {
+            output->push_back(ch);
+            continue;
+        }
+        if (i + 1 >= literal.size()) {
+            return false;
+        }
+
+        const char escaped = literal[++i];
+        switch (escaped) {
+            case '"':
+            case '\\':
+            case '/':
+                output->push_back(escaped);
+                break;
+            case 'b':
+                output->push_back('\b');
+                break;
+            case 'f':
+                output->push_back('\f');
+                break;
+            case 'n':
+                output->push_back('\n');
+                break;
+            case 'r':
+                output->push_back('\r');
+                break;
+            case 't':
+                output->push_back('\t');
+                break;
+            case 'u': {
+                uint32_t codePoint = 0;
+                if (!ReadJsonHexCodeUnit(literal, i + 1, &codePoint)) {
+                    return false;
+                }
+                i += 4;
+
+                if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
+                    if (i + 6 >= literal.size() || literal[i + 1] != '\\' || literal[i + 2] != 'u') {
+                        return false;
+                    }
+                    uint32_t lowSurrogate = 0;
+                    if (!ReadJsonHexCodeUnit(literal, i + 3, &lowSurrogate) ||
+                        lowSurrogate < 0xdc00 || lowSurrogate > 0xdfff) {
+                        return false;
+                    }
+                    codePoint = 0x10000 +
+                        (((codePoint - 0xd800) << 10) | (lowSurrogate - 0xdc00));
+                    i += 6;
+                } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
+                    return false;
+                }
+
+                if (!AppendUtf8CodePoint(codePoint, output)) {
+                    return false;
+                }
+                break;
+            }
+            default:
+                return false;
+        }
+    }
+
+    return true;
+}
+
 #if RECPLAY_HAS_DROGON
 std::string RequestMethodToString(drogon::HttpMethod method) {
     switch (method) {
@@ -233,6 +365,178 @@ drogon::HttpMethod ToDrogonMethod(const std::string& method) {
     }
     return drogon::Invalid;
 }
+
+std::atomic<HttpServer*> g_active_http_server{nullptr};
+std::mutex g_drogon_state_mutex;
+bool g_drogon_listener_configured = false;
+std::string g_drogon_listener_host;
+int g_drogon_listener_port = -1;
+std::once_flag g_drogon_thread_once;
+std::thread g_drogon_thread;
+
+HttpResponse MakeDrogonUnavailableResponse() {
+    return HttpResponse{503, "application/json", "{\"error\":\"HTTP server unavailable\"}"};
+}
+
+void SendDrogonResponse(
+    const HttpResponse& response,
+    std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+    auto httpResponse = drogon::HttpResponse::newHttpResponse();
+    httpResponse->setStatusCode(ToDrogonStatus(response.status_code));
+    httpResponse->setContentTypeString(response.content_type);
+    httpResponse->setBody(response.body);
+    callback(httpResponse);
+}
+
+HttpResponse DispatchToActiveHttpServer(
+    const std::string& method,
+    const std::string& path,
+    const std::string& body) {
+    auto* server = g_active_http_server.load(std::memory_order_acquire);
+    if (server == nullptr || !server->IsRunning()) {
+        return MakeDrogonUnavailableResponse();
+    }
+    return server->HandleRequest(method, path, body);
+}
+
+void RegisterDrogonRoutes() {
+    const auto registerRoute =
+        [](const std::string& method, const std::string& path) {
+            drogon::app().registerHandler(
+                path,
+                [method, path](const drogon::HttpRequestPtr& request,
+                               std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+                    SendDrogonResponse(
+                        DispatchToActiveHttpServer(
+                            method,
+                            path,
+                            std::string(request->getBody())),
+                        std::move(callback));
+                },
+                {ToDrogonMethod(method)});
+        };
+
+    drogon::app().registerHandler(
+        "/api/health",
+        [](const drogon::HttpRequestPtr&,
+           std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+            auto* server = g_active_http_server.load(std::memory_order_acquire);
+            if (server == nullptr || !server->IsRunning()) {
+                SendDrogonResponse(MakeDrogonUnavailableResponse(), std::move(callback));
+                return;
+            }
+
+            auto response = drogon::HttpResponse::newHttpResponse();
+            response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+            response->setBody("{\"status\":\"ok\"}");
+            callback(response);
+        });
+
+    registerRoute("GET", "/api/session/state");
+    registerRoute("GET", "/api/stats");
+    registerRoute("POST", "/api/session/record");
+    registerRoute("POST", "/api/session/record/pause");
+    registerRoute("POST", "/api/session/record/resume");
+    registerRoute("POST", "/api/session/record/stop");
+    registerRoute("POST", "/api/session/playback/open");
+    registerRoute("POST", "/api/session/playback/play");
+    registerRoute("POST", "/api/session/playback/pause");
+    registerRoute("POST", "/api/session/playback/seek");
+    registerRoute("POST", "/api/session/playback/speed");
+    registerRoute("POST", "/api/session/playback/loop");
+    registerRoute("POST", "/api/session/playback/stop");
+    registerRoute("GET", "/api/plugins");
+    registerRoute("GET", "/api/channels");
+    registerRoute("GET", "/api/mappings");
+    registerRoute("POST", "/api/mappings");
+
+    drogon::app().registerHandler(
+        "/api/plugins/{path:.*}",
+        [](const drogon::HttpRequestPtr& request,
+           std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+            SendDrogonResponse(
+                DispatchToActiveHttpServer(
+                    RequestMethodToString(request->method()),
+                    request->path(),
+                    std::string(request->getBody())),
+                std::move(callback));
+        },
+        {drogon::Get, drogon::Post});
+
+    drogon::app().registerHandlerViaRegex(
+        "^/(?!api(?:/|$)).*$",
+        [](const drogon::HttpRequestPtr& request,
+           std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
+            SendDrogonResponse(
+                DispatchToActiveHttpServer(
+                    "GET",
+                    request->path(),
+                    std::string(request->getBody())),
+                std::move(callback));
+        },
+        {drogon::Get});
+}
+
+bool ConfigureDrogonApp(const std::string& host, int port) {
+    std::lock_guard<std::mutex> lock(g_drogon_state_mutex);
+    if (!g_drogon_listener_configured) {
+        drogon::app().addListener(host, static_cast<uint16_t>(port));
+        RegisterDrogonRoutes();
+        g_drogon_listener_configured = true;
+        g_drogon_listener_host = host;
+        g_drogon_listener_port = port;
+        return true;
+    }
+
+    return g_drogon_listener_host == host && g_drogon_listener_port == port;
+}
+
+void ShutdownDrogonOnProcessExit() {
+    std::thread threadToJoin;
+    {
+        std::lock_guard<std::mutex> lock(g_drogon_state_mutex);
+        g_active_http_server.store(nullptr, std::memory_order_release);
+        if (g_drogon_thread.joinable()) {
+            threadToJoin = std::move(g_drogon_thread);
+        }
+    }
+
+    try {
+        if (drogon::app().isRunning()) {
+            drogon::app().quit();
+        }
+    } catch (...) {
+    }
+
+    if (threadToJoin.joinable()) {
+        threadToJoin.detach();
+    }
+}
+
+bool EnsureDrogonThreadRunning() {
+    std::call_once(g_drogon_thread_once, [] {
+        std::atexit(ShutdownDrogonOnProcessExit);
+        g_drogon_thread = std::thread([] {
+            try {
+                drogon::app().run();
+            } catch (...) {
+            }
+        });
+    });
+
+    for (size_t attempt = 0; attempt < 200; ++attempt) {
+        if (drogon::app().isRunning()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    try {
+        return drogon::app().isRunning();
+    } catch (...) {
+        return false;
+    }
+}
 #endif
 
 } // namespace
@@ -248,92 +552,30 @@ bool HttpServer::Start(const std::string& host, int port) {
     }
 
 #if RECPLAY_HAS_DROGON
-    if (!drogon_configured_) {
-        drogon::app().addListener(host, static_cast<uint16_t>(port));
-
-        const auto registerRoute =
-            [this](const std::string& method, const std::string& path) {
-                drogon::app().registerHandler(
-                    path,
-                    [this, method, path](const drogon::HttpRequestPtr& request,
-                                         std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
-                        const auto response =
-                            HandleRequest(method, path, std::string(request->getBody()));
-                        auto httpResponse = drogon::HttpResponse::newHttpResponse();
-                        httpResponse->setStatusCode(ToDrogonStatus(response.status_code));
-                        httpResponse->setContentTypeString(response.content_type);
-                        httpResponse->setBody(response.body);
-                        callback(httpResponse);
-                    },
-                    {ToDrogonMethod(method)});
-            };
-
-        drogon::app().registerHandler(
-            "/api/health",
-            [](const drogon::HttpRequestPtr&,
-               std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
-                auto response = drogon::HttpResponse::newHttpResponse();
-                response->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-                response->setBody("{\"status\":\"ok\"}");
-                callback(response);
-            });
-
-        registerRoute("GET", "/api/session/state");
-        registerRoute("GET", "/api/stats");
-        registerRoute("POST", "/api/session/record");
-        registerRoute("POST", "/api/session/record/pause");
-        registerRoute("POST", "/api/session/record/resume");
-        registerRoute("POST", "/api/session/record/stop");
-        registerRoute("POST", "/api/session/playback/open");
-        registerRoute("POST", "/api/session/playback/play");
-        registerRoute("POST", "/api/session/playback/pause");
-        registerRoute("POST", "/api/session/playback/seek");
-        registerRoute("POST", "/api/session/playback/speed");
-        registerRoute("POST", "/api/session/playback/loop");
-        registerRoute("POST", "/api/session/playback/stop");
-        registerRoute("GET", "/api/plugins");
-        registerRoute("GET", "/api/channels");
-        registerRoute("GET", "/api/mappings");
-        registerRoute("POST", "/api/mappings");
-
-        drogon::app().registerHandler(
-            "/api/plugins/{path:.*}",
-            [this](const drogon::HttpRequestPtr& request,
-                   std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
-                const auto response = HandleRequest(
-                    RequestMethodToString(request->method()),
-                    request->path(),
-                    std::string(request->getBody()));
-                auto httpResponse = drogon::HttpResponse::newHttpResponse();
-                httpResponse->setStatusCode(ToDrogonStatus(response.status_code));
-                httpResponse->setContentTypeString(response.content_type);
-                httpResponse->setBody(response.body);
-                callback(httpResponse);
-            },
-            {drogon::Get, drogon::Post});
-
-        drogon::app().registerHandler(
-            "/{path:.*}",
-            [this](const drogon::HttpRequestPtr& request,
-                   std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
-                const auto response =
-                    HandleRequest("GET", request->path(), std::string(request->getBody()));
-                auto httpResponse = drogon::HttpResponse::newHttpResponse();
-                httpResponse->setStatusCode(ToDrogonStatus(response.status_code));
-                httpResponse->setContentTypeString(response.content_type);
-                httpResponse->setBody(response.body);
-                callback(httpResponse);
-            },
-            {drogon::Get});
-        drogon_configured_ = true;
-    }
-
-    server_thread_ = std::thread([] {
-        try {
-            drogon::app().run();
-        } catch (...) {
+    try {
+        auto* active = g_active_http_server.load(std::memory_order_acquire);
+        if (active != nullptr && active != this) {
+            running_.store(false, std::memory_order_release);
+            return false;
         }
-    });
+        if (!ConfigureDrogonApp(host, port) || !EnsureDrogonThreadRunning()) {
+            running_.store(false, std::memory_order_release);
+            return false;
+        }
+        HttpServer* expected = nullptr;
+        if (!g_active_http_server.compare_exchange_strong(
+                expected,
+                this,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire) &&
+            expected != this) {
+            running_.store(false, std::memory_order_release);
+            return false;
+        }
+    } catch (...) {
+        running_.store(false, std::memory_order_release);
+        return false;
+    }
 #else
     (void)host;
     (void)port;
@@ -347,10 +589,12 @@ void HttpServer::Stop() {
     }
 
 #if RECPLAY_HAS_DROGON
-    drogon::app().quit();
-    if (server_thread_.joinable()) {
-        server_thread_.join();
-    }
+    HttpServer* expected = this;
+    g_active_http_server.compare_exchange_strong(
+        expected,
+        nullptr,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire);
 #endif
 }
 
@@ -472,7 +716,7 @@ HttpResponse HttpServer::HandleSessionState() const {
     stream << "{\"state\":\"" << SessionStateToString(session->GetState()) << "\""
            << ",\"duration_ns\":" << session->GetDuration()
            << ",\"position_ns\":" << session->GetCurrentPosition()
-           << ",\"speed\":" << session->GetCurrentSpeed()
+           << ",\"speed\":" << SanitizeJsonNumber(session->GetCurrentSpeed())
            << "}";
     return MakeJsonResponse(stream.str());
 }
@@ -485,16 +729,17 @@ HttpResponse HttpServer::HandleStats() const {
 
     const auto snapshot = stats->GetSnapshot();
     std::ostringstream stream;
-    stream << "{\"total_throughput_mbps\":" << snapshot.total_throughput_mbps
+    stream << "{\"total_throughput_mbps\":" << SanitizeJsonNumber(snapshot.total_throughput_mbps)
            << ",\"total_packets\":" << snapshot.total_packets
            << ",\"total_drops\":" << snapshot.total_drops
-           << ",\"drop_rate\":" << snapshot.drop_rate
-           << ",\"write_latency_p99_ms\":" << snapshot.write_latency_p99_ms
+           << ",\"drop_rate\":" << SanitizeJsonNumber(snapshot.drop_rate)
+           << ",\"write_latency_p99_ms\":" << SanitizeJsonNumber(snapshot.write_latency_p99_ms)
            << ",\"ringbuf_used\":" << snapshot.ringbuf_used
            << ",\"ringbuf_capacity\":" << snapshot.ringbuf_capacity
            << ",\"disk_queue_bytes\":" << snapshot.disk_queue_bytes
            << ",\"cpu_usage_percent\":";
-    if (snapshot.cpu_usage_percent.has_value()) {
+    if (snapshot.cpu_usage_percent.has_value() &&
+        std::isfinite(*snapshot.cpu_usage_percent)) {
         stream << *snapshot.cpu_usage_percent;
     } else {
         stream << "null";
@@ -551,7 +796,18 @@ HttpResponse HttpServer::HandlePlaybackOpen(const std::string& body) const {
     if (filePath.empty()) {
         return MakeErrorResponse(400, "file_path is required");
     }
-    if (!session->OpenForPlayback(filePath)) {
+
+    // Optional replay target config (UDP/TCP address+port to re-emit packets to).
+    // Falls back to "protocol", then to "{}" (protocol service defaults).
+    std::string replayConfig = ExtractJsonObjectLiteral(body, "protocol_config");
+    if (replayConfig.empty()) {
+        replayConfig = ExtractJsonObjectLiteral(body, "protocol");
+    }
+    if (replayConfig.empty()) {
+        replayConfig = "{}";
+    }
+
+    if (!session->OpenForPlayback(filePath, replayConfig)) {
         return MakeErrorResponse(400, "Failed to open playback file: " + filePath);
     }
     return MakeJsonResponse("{\"ok\":true}");
@@ -979,7 +1235,45 @@ std::string HttpServer::ExtractJsonStringLiteral(const std::string& body, const 
     if (!SkipJsonString(body, &cursor)) {
         return {};
     }
-    return body.substr(start + 1, cursor - start - 2);
+    std::string unescaped;
+    if (!UnescapeJsonStringLiteral(body.substr(start + 1, cursor - start - 2), &unescaped)) {
+        return {};
+    }
+    return unescaped;
+}
+
+std::string HttpServer::ExtractJsonObjectLiteral(const std::string& body, const std::string& key) {
+    size_t start = 0;
+    if (!FindTopLevelKeyValueStart(body, key, &start)) {
+        return {};
+    }
+    if (start >= body.size() || (body[start] != '{' && body[start] != '[')) {
+        return {};
+    }
+
+    const char open = body[start];
+    const char close = (open == '{') ? '}' : ']';
+    int depth = 0;
+    size_t cursor = start;
+    while (cursor < body.size()) {
+        const char c = body[cursor];
+        if (c == '"') {
+            if (!SkipJsonString(body, &cursor)) {
+                return {};
+            }
+            continue;
+        }
+        if (c == open) {
+            ++depth;
+        } else if (c == close) {
+            --depth;
+            if (depth == 0) {
+                return body.substr(start, cursor - start + 1);
+            }
+        }
+        ++cursor;
+    }
+    return {};
 }
 
 } // namespace recplay

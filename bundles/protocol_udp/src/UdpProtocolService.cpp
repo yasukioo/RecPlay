@@ -124,9 +124,9 @@ bool UdpProtocolService::StartCapture(const std::string& configJson, PacketCallb
 
         StartReceiveLoop();
         if (startIoThread) {
-            io_thread_ = std::thread([this] {
-                if (io_context_) {
-                    io_context_->run();
+            io_thread_ = std::thread([activeIoContext] {
+                if (activeIoContext) {
+                    activeIoContext->run();
                 }
             });
         }
@@ -153,10 +153,9 @@ void UdpProtocolService::StopCapture() {
         }
     }
     ResetIoRuntimeIfUnused();
-#endif
-
     std::lock_guard<std::mutex> lock(mutex_);
     capture_epoch_ns_.store(0, std::memory_order_release);
+#endif
 }
 
 bool UdpProtocolService::IsCapturing() const {
@@ -175,27 +174,49 @@ bool UdpProtocolService::StartReplay(const std::string& configJson) {
     return false;
 #else
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!io_context_) {
-            io_context_ = std::make_unique<boost::asio::io_context>();
-            work_guard_ = std::make_unique<
-                boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
-                boost::asio::make_work_guard(*io_context_));
-            io_thread_ = std::thread([this] {
-                if (io_context_) {
-                    io_context_->run();
+        boost::asio::io_context* activeIoContext = nullptr;
+        bool startIoThread = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!io_context_) {
+                io_context_ = std::make_unique<boost::asio::io_context>();
+                work_guard_ = std::make_unique<
+                    boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(
+                    boost::asio::make_work_guard(*io_context_));
+                startIoThread = true;
+            }
+            activeIoContext = io_context_.get();
+        }
+
+        if (activeIoContext == nullptr) {
+            return false;
+        }
+
+        if (startIoThread) {
+            io_thread_ = std::thread([activeIoContext] {
+                if (activeIoContext) {
+                    activeIoContext->run();
                 }
             });
         }
-        replay_socket_ = std::make_unique<boost::asio::ip::udp::socket>(*io_context_);
-        replay_socket_->open(boost::asio::ip::udp::v4());
-        replay_socket_->bind(boost::asio::ip::udp::endpoint(
+
+        auto socket = std::make_unique<boost::asio::ip::udp::socket>(*activeIoContext);
+        socket->open(boost::asio::ip::udp::v4());
+        socket->bind(boost::asio::ip::udp::endpoint(
             boost::asio::ip::make_address(config.bind_interface),
             0));
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!io_context_) {
+            return false;
+        }
+
+        replay_socket_ = std::move(socket);
         replay_config_ = config;
         replaying_ = true;
         return true;
     } catch (...) {
+        std::lock_guard<std::mutex> lock(mutex_);
         replaying_ = false;
         replay_socket_.reset();
         return false;
@@ -274,15 +295,19 @@ bool UdpProtocolService::LoadConfig(const std::string& configJson, RuntimeConfig
     (void)config;
     return false;
 #else
-    const auto json = nlohmann::json::parse(configJson.empty() ? "{}" : configJson);
-    config.address = json.value("address", config.address);
-    config.bind_interface = json.value("interface", config.bind_interface);
-    config.port = static_cast<unsigned short>(json.value("port", static_cast<int>(config.port)));
-    config.recv_buf = json.value("recv_buf", config.recv_buf);
-    config.channel_id = json.value("channel_id", config.channel_id);
-    config.channel_name = json.value("channel_name", config.channel_name);
-    config.topic = json.value("topic", config.topic);
-    return true;
+    try {
+        const auto json = nlohmann::json::parse(configJson.empty() ? "{}" : configJson);
+        config.address = json.value("address", config.address);
+        config.bind_interface = json.value("interface", config.bind_interface);
+        config.port = static_cast<unsigned short>(json.value("port", static_cast<int>(config.port)));
+        config.recv_buf = json.value("recv_buf", config.recv_buf);
+        config.channel_id = json.value("channel_id", config.channel_id);
+        config.channel_name = json.value("channel_name", config.channel_name);
+        config.topic = json.value("topic", config.topic);
+        return true;
+    } catch (...) {
+        return false;
+    }
 #endif
 }
 

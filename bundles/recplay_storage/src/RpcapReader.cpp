@@ -13,6 +13,13 @@
 #include <utility>
 #include <vector>
 
+#if __has_include(<zstd.h>)
+#include <zstd.h>
+#define RECPLAY_HAS_ZSTD 1
+#else
+#define RECPLAY_HAS_ZSTD 0
+#endif
+
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
 #define RECPLAY_HAS_JSON 1
@@ -23,6 +30,12 @@
 namespace recplay {
 
 namespace {
+
+constexpr uint64_t kMaxSchemaSize = 16ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kMaxFooterCount = 1'000'000ULL;
+constexpr uint64_t kMaxChunkPayloadSize = 128ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kMaxChunkPacketCount = 1'000'000ULL;
+constexpr uint32_t kMaxStringSize = 16U * 1024U * 1024U;
 
 template <typename T>
 bool ReadScalar(IoBackend* backend, T& value) {
@@ -38,6 +51,9 @@ bool ReadString(IoBackend* backend, std::string& value) {
     if (!ReadScalar(backend, size)) {
         return false;
     }
+    if (size > kMaxStringSize) {
+        return false;
+    }
     value.resize(size);
     if (size == 0) {
         return true;
@@ -49,6 +65,9 @@ bool ReadString(IoBackend* backend, std::string& value) {
 bool ReadBytes(IoBackend* backend, std::vector<uint8_t>& value) {
     uint32_t size = 0;
     if (!ReadScalar(backend, size)) {
+        return false;
+    }
+    if (size > kMaxStringSize) {
         return false;
     }
     value.resize(size);
@@ -67,6 +86,32 @@ std::string GetCodecName(const recplay::RpcapHeader& header) {
 
 bool IsCompressedChunkFormat(const recplay::RpcapHeader& header) {
     return header.version >= 2 && !GetCodecName(header).empty();
+}
+
+std::vector<uint8_t> DecompressCompressedChunk(const std::string& codec_name,
+                                               const uint8_t* data,
+                                               size_t len,
+                                               size_t original_size,
+                                               ICodecService* codec_service) {
+    if (codec_service != nullptr && codec_service->GetName() == codec_name) {
+        return codec_service->Decompress(data, len, original_size);
+    }
+
+#if RECPLAY_HAS_ZSTD
+    if (codec_name == "zstd") {
+        std::vector<uint8_t> decompressed(original_size);
+        const size_t written = ZSTD_decompress(decompressed.data(), decompressed.size(), data, len);
+        if (ZSTD_isError(written) != 0U) {
+            return {};
+        }
+        decompressed.resize(written);
+        return decompressed;
+    }
+#else
+    (void)codec_name;
+#endif
+
+    return {};
 }
 
 } // namespace
@@ -94,10 +139,19 @@ bool RpcapReader::Open(const std::string& path) {
         return false;
     }
     const auto codec_name = GetCodecName(header_);
-    if (IsCompressedChunkFormat(header_) &&
-        (codec_service_ == nullptr || codec_service_->GetName() != codec_name)) {
-        Close();
-        return false;
+    if (IsCompressedChunkFormat(header_)) {
+        const bool has_matching_codec_service =
+            codec_service_ != nullptr && codec_service_->GetName() == codec_name;
+        const bool has_builtin_fallback =
+#if RECPLAY_HAS_ZSTD
+            codec_name == "zstd";
+#else
+            false;
+#endif
+        if (!has_matching_codec_service && !has_builtin_fallback) {
+            Close();
+            return false;
+        }
     }
     if (!LoadSchema() || !LoadFooter()) {
         Close();
@@ -219,26 +273,33 @@ bool RpcapReader::LoadSchema() {
     if (!ReadBytes(&schema_size, sizeof(schema_size))) {
         return false;
     }
+    if (schema_size > kMaxSchemaSize) {
+        return false;
+    }
 
-    std::vector<uint8_t> schema_payload(schema_size);
+    std::vector<uint8_t> schema_payload(static_cast<size_t>(schema_size));
     if (schema_size > 0 && !ReadBytes(schema_payload.data(), schema_payload.size())) {
         return false;
     }
 
 #if RECPLAY_HAS_JSON
     if (!schema_payload.empty()) {
-        const auto document = nlohmann::json::parse(schema_payload.begin(), schema_payload.end());
-        channels_.clear();
-        for (const auto& item : document) {
-            ChannelInfo channel;
-            channel.id = item.value("id", 0U);
-            channel.name = item.value("name", std::string{});
-            channel.protocol = item.value("protocol", std::string{});
-            channel.topic = item.value("topic", std::string{});
-            if (item.contains("metadata")) {
-                channel.metadata = item.at("metadata").get<std::map<std::string, std::string>>();
+        try {
+            const auto document = nlohmann::json::parse(schema_payload.begin(), schema_payload.end());
+            channels_.clear();
+            for (const auto& item : document) {
+                ChannelInfo channel;
+                channel.id = item.value("id", 0U);
+                channel.name = item.value("name", std::string{});
+                channel.protocol = item.value("protocol", std::string{});
+                channel.topic = item.value("topic", std::string{});
+                if (item.contains("metadata")) {
+                    channel.metadata = item.at("metadata").get<std::map<std::string, std::string>>();
+                }
+                channels_.push_back(std::move(channel));
             }
-            channels_.push_back(std::move(channel));
+        } catch (...) {
+            return false;
         }
     }
 #else
@@ -255,6 +316,9 @@ bool RpcapReader::LoadFooter() {
 
     uint64_t footer_count = 0;
     if (!ReadBytes(&footer_count, sizeof(footer_count))) {
+        return false;
+    }
+    if (footer_count > kMaxFooterCount) {
         return false;
     }
 
@@ -293,8 +357,12 @@ bool RpcapReader::LoadNextChunk() {
         return false;
     }
     (void)chunk_id;
+    if (packet_count > kMaxChunkPacketCount || payload_size > kMaxChunkPayloadSize) {
+        has_more_ = false;
+        return false;
+    }
 
-    std::vector<uint8_t> payload(payload_size);
+    std::vector<uint8_t> payload(static_cast<size_t>(payload_size));
     if (payload_size > 0 && !ReadBytes(payload.data(), payload.size())) {
         has_more_ = false;
         return false;
@@ -302,19 +370,19 @@ bool RpcapReader::LoadNextChunk() {
 
     const auto codec_name = GetCodecName(header_);
     if (IsCompressedChunkFormat(header_)) {
-        if (payload.size() < sizeof(uint64_t) ||
-            codec_service_ == nullptr ||
-            codec_service_->GetName() != codec_name) {
+        if (payload.size() < sizeof(uint64_t)) {
             has_more_ = false;
             return false;
         }
 
         uint64_t original_size = 0;
         std::memcpy(&original_size, payload.data(), sizeof(original_size));
-        auto decompressed = codec_service_->Decompress(
+        auto decompressed = DecompressCompressedChunk(
+            codec_name,
             payload.data() + sizeof(original_size),
             payload.size() - sizeof(original_size),
-            static_cast<size_t>(original_size));
+            static_cast<size_t>(original_size),
+            codec_service_);
         if (decompressed.size() != static_cast<size_t>(original_size)) {
             has_more_ = false;
             return false;

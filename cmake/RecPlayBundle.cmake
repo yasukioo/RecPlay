@@ -28,12 +28,14 @@ function(recplay_add_bundle bundle_name)
     set_target_properties(${bundle_name} PROPERTIES
         US_BUNDLE_NAME ${bundle_name}
         WINDOWS_EXPORT_ALL_SYMBOLS ON
-        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bundles/$<CONFIG>
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bundles/$<CONFIG>
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bundles/$<CONFIG>
+        ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>/bundles
+        LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>/bundles
+        RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>/bundles
     )
 
-    if(COMMAND usFunctionEmbedResources AND NOT WIN32)
+    if(COMMAND usFunctionEmbedResources)
+        usFunctionGetResourceSource(TARGET ${bundle_name} OUT _bundle_res_src APPEND)
+        target_sources(${bundle_name} PRIVATE ${_bundle_res_src})
         usFunctionEmbedResources(TARGET ${bundle_name} WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} FILES manifest.json)
     endif()
 endfunction()

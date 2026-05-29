@@ -59,7 +59,13 @@ export function resolveTransportCommand(
       }
       return null;
     case "play":
-      if (state === "Idle" || state === "Unknown" || state === "PlayingPaused") {
+      if (
+        state === "Idle" ||
+        state === "Unknown" ||
+        state === "Stopped" ||
+        state === "PlaybackPaused" ||
+        state === "PlayingPaused"
+      ) {
         return "playPlayback";
       }
       return null;
@@ -75,7 +81,12 @@ export function resolveTransportCommand(
       if (state === "Recording" || state === "RecordingPaused") {
         return "stopRecording";
       }
-      if (state === "Playing" || state === "PlayingPaused") {
+      if (
+        state === "Playing" ||
+        state === "PlaybackPaused" ||
+        state === "PlayingPaused" ||
+        state === "Seeking"
+      ) {
         return "stopPlayback";
       }
       return null;

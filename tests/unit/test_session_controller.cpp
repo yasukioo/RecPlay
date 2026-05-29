@@ -13,6 +13,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -269,12 +270,15 @@ void TestPlaybackLifecycle() {
     CoreEngine engine;
     FakeStorageService storage;
     FakeProtocolService udp("UDP");
+    FakeProtocolService tcp("TCP");
 
     storage.playback_duration_ns = 200;
+    storage.playback_channels = {ChannelInfo{7, "udp-src", "UDP", "udp/topic", {}}};
     storage.playback_packets = {MakePacket(10, 3), MakePacket(40, 3), MakePacket(90, 3)};
 
     engine.SetStorageService(&storage);
     engine.AttachProtocol("UDP", &udp);
+    engine.AttachProtocol("TCP", &tcp);
 
     SessionController controller(&engine);
     const bool opened = controller.OpenForPlayback("capture.rpcap");
@@ -286,6 +290,7 @@ void TestPlaybackLifecycle() {
     Expect(controller.GetState() == SessionState::Stopped, "open should leave controller in Stopped pre-play state");
     Expect(storage.opened_path == "capture.rpcap", "storage should receive playback path");
     Expect(udp.replay_started, "protocol replay should start");
+    Expect(!tcp.replay_started, "unrelated protocols should not be started for playback");
     Expect(controller.GetDuration() == 200, "duration should come from header");
 
     controller.Play(2.0);
@@ -331,6 +336,32 @@ void TestPlaybackQueueIsRefilledIncrementally() {
     Expect(opened, "playback file should open for incremental queue test");
     Expect(storage.read_index < storage.playback_packets.size(),
            "open should not drain entire playback file into scheduler");
+}
+
+void TestPlaybackCanInferUdpProtocolWhenSchemaIsEmpty() {
+    CoreEngine engine;
+    FakeStorageService storage;
+    FakeProtocolService udp("UDP");
+    FakeProtocolService tcp("TCP");
+
+    storage.playback_duration_ns = 200;
+    storage.playback_packets = {MakePacket(10, 3), MakePacket(40, 3), MakePacket(90, 3)};
+    storage.playback_channels.clear();
+
+    engine.SetStorageService(&storage);
+    engine.AttachProtocol("UDP", &udp);
+    engine.AttachProtocol("TCP", &tcp);
+
+    SessionController controller(&engine);
+    const bool opened = controller.OpenForPlayback(
+        "capture.rpcap",
+        R"({"address":"239.1.1.1","port":5000,"interface":"0.0.0.0"})");
+
+    Expect(opened, "playback should open when schema is empty but replay config identifies UDP");
+    Expect(udp.replay_started, "UDP replay should be inferred from replay config");
+    Expect(!tcp.replay_started, "TCP replay should stay stopped when replay config identifies UDP");
+
+    controller.Stop();
 }
 
 void TestLoopPlaybackReturnsToLoopStart() {
@@ -452,6 +483,43 @@ void TestStopAfterOpenForPlaybackStillCleansUpPlayback() {
            "Stop after OpenForPlayback should remain Stopped");
 }
 
+void TestOnStateChangedSupportsMultipleCallbacks() {
+    CoreEngine engine;
+    FakeStorageService storage;
+    FakeProtocolService udp("UDP");
+    udp.channels.push_back(ChannelInfo{7, "udp-src", "UDP", "udp/topic", {}});
+
+    engine.SetStorageService(&storage);
+    engine.AttachProtocol("UDP", &udp);
+
+    SessionController controller(&engine);
+    std::vector<std::pair<SessionState, SessionState>> transitions_a;
+    std::vector<std::pair<SessionState, SessionState>> transitions_b;
+
+    controller.OnStateChanged([&](SessionState from, SessionState to) {
+        transitions_a.emplace_back(from, to);
+    });
+    controller.OnStateChanged([&](SessionState from, SessionState to) {
+        transitions_b.emplace_back(from, to);
+    });
+
+    const bool started = controller.StartRecording(
+        R"({"output_path":"capture.rpcap","protocols":["UDP"],"protocol_config":{"port":5000}})");
+    Expect(started, "recording should start for callback fanout test");
+
+    controller.StopRecording();
+
+    Expect(transitions_a.size() == 2, "first callback should receive both state transitions");
+    Expect(transitions_b.size() == 2, "second callback should receive both state transitions");
+    Expect(transitions_a == transitions_b, "all callbacks should observe identical transition sequence");
+    Expect(transitions_a[0].first == SessionState::Idle &&
+               transitions_a[0].second == SessionState::Recording,
+           "first transition should be Idle -> Recording");
+    Expect(transitions_a[1].first == SessionState::Recording &&
+               transitions_a[1].second == SessionState::Stopped,
+           "second transition should be Recording -> Stopped");
+}
+
 } // namespace
 
 int main() {
@@ -459,10 +527,12 @@ int main() {
         TestRecordingLifecycle();
         TestPlaybackLifecycle();
         TestPlaybackQueueIsRefilledIncrementally();
+        TestPlaybackCanInferUdpProtocolWhenSchemaIsEmpty();
         TestLoopPlaybackReturnsToLoopStart();
         TestInvalidIdleActionsAreNoOps();
         TestStopDuringSeekingStillCleansUpPlayback();
         TestStopAfterOpenForPlaybackStillCleansUpPlayback();
+        TestOnStateChangedSupportsMultipleCallbacks();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

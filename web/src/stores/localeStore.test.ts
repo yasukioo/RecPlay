@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { sanitizeLocale, useLocaleStore } from "./localeStore";
+import { getInitialLocale, sanitizeLocale, useLocaleStore } from "./localeStore";
 
 afterEach(() => {
   useLocaleStore.setState({ locale: "en-US" });
@@ -12,6 +12,12 @@ describe("sanitizeLocale", () => {
     expect(sanitizeLocale("en-US")).toBe("en-US");
     expect(sanitizeLocale("ja-JP")).toBe("en-US");
     expect(sanitizeLocale(null)).toBe("en-US");
+  });
+
+  it("reads the initial locale from storage", () => {
+    expect(getInitialLocale({ getItem: () => "zh-CN" })).toBe("zh-CN");
+    expect(getInitialLocale({ getItem: () => "ja-JP" })).toBe("en-US");
+    expect(getInitialLocale(null)).toBe("en-US");
   });
 });
 

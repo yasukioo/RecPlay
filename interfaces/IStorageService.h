@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+#ifdef CreateFile
+#undef CreateFile
+#endif
+
 namespace recplay {
 
 class IStorageService {

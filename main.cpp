@@ -21,6 +21,13 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
 #endif
@@ -35,10 +42,11 @@
 namespace {
 
 std::atomic<cppmicroservices::Framework*> g_framework{nullptr};
+std::atomic<bool> g_stop_requested{false};
 
 struct RuntimeConfig {
     std::filesystem::path config_path;
-    std::vector<std::string> bundle_search_paths{"bundles", "build/bundles"};
+    std::vector<std::string> bundle_search_paths{"bundles"};
     std::vector<std::string> auto_start{
         "recplay_core",
         "recplay_session",
@@ -87,10 +95,7 @@ void LogError(const std::string& message) {
 
 void HandleSignal(int signal_number) {
     (void)signal_number;
-    auto* framework = g_framework.load(std::memory_order_acquire);
-    if (framework != nullptr) {
-        framework->Stop();
-    }
+    g_stop_requested.store(true, std::memory_order_release);
 }
 
 void RegisterSignalHandlers() {
@@ -104,6 +109,44 @@ void InitializeLogging() {
 #if RECPLAY_HAS_SPDLOG
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
     spdlog::flush_on(spdlog::level::info);
+#endif
+}
+
+void PrependDllSearchPaths(const std::vector<std::filesystem::path>& roots) {
+#ifdef _WIN32
+    std::wstring current_path;
+    DWORD path_size = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    if (path_size > 0) {
+        current_path.resize(path_size - 1);
+        if (GetEnvironmentVariableW(L"PATH", current_path.data(), path_size) == 0) {
+            current_path.clear();
+        }
+    }
+
+    std::wstring updated_path;
+    for (const auto& root : roots) {
+        const auto root_path = root.wstring();
+        if (root_path.empty()) {
+            continue;
+        }
+        if (!updated_path.empty()) {
+            updated_path.push_back(L';');
+        }
+        updated_path += root_path;
+    }
+
+    if (!current_path.empty()) {
+        if (!updated_path.empty()) {
+            updated_path.push_back(L';');
+        }
+        updated_path += current_path;
+    }
+
+    if (!updated_path.empty()) {
+        SetEnvironmentVariableW(L"PATH", updated_path.c_str());
+    }
+#else
+    (void)roots;
 #endif
 }
 
@@ -138,31 +181,21 @@ RuntimeConfig LoadConfig(const std::string& path) {
 void InstallBundles(cppmicroservices::BundleContext context,
                     const RuntimeConfig& config) {
     const auto process_root = std::filesystem::current_path();
+    const auto bundle_roots = recplay::ResolveBundleSearchRoots(
+        config.bundle_search_paths,
+        config.config_path,
+        process_root);
+    PrependDllSearchPaths(bundle_roots);
     std::vector<std::string> bundle_locations;
-    std::set<std::filesystem::path> seen_locations;
 
-    for (auto root : recplay::ResolveBundleSearchRoots(
-             config.bundle_search_paths,
-             config.config_path,
-             process_root)) {
+    for (const auto& root : bundle_roots) {
         if (!std::filesystem::exists(root) || !std::filesystem::is_directory(root)) {
             LogInfo("bundle search path missing: " + root.string());
-            continue;
         }
-
-        for (const auto& entry : std::filesystem::directory_iterator(root)) {
-            if (!entry.is_regular_file()) {
-                continue;
-            }
-            const auto ext = entry.path().extension().string();
-            if (ext != ".dll" && ext != ".so" && ext != ".dylib") {
-                continue;
-            }
-            const auto canonical_path = std::filesystem::weakly_canonical(entry.path());
-            if (seen_locations.insert(canonical_path).second) {
-                bundle_locations.push_back(canonical_path.string());
-            }
-        }
+    }
+    for (const auto& location : recplay::DiscoverBundleBinaryLocations(
+             bundle_roots, config.auto_start)) {
+        bundle_locations.push_back(location.string());
     }
 
     if (bundle_locations.empty()) {
@@ -173,9 +206,15 @@ void InstallBundles(cppmicroservices::BundleContext context,
     std::vector<cppmicroservices::Bundle> installed;
     installed.reserve(bundle_locations.size());
     for (const auto& location : bundle_locations) {
-        LogInfo("installing bundle binary: " + location);
-        auto bundles = context.InstallBundles(location);
-        installed.insert(installed.end(), bundles.begin(), bundles.end());
+        try {
+            LogInfo("installing bundle binary: " + location);
+            auto bundles = context.InstallBundles(location);
+            installed.insert(installed.end(), bundles.begin(), bundles.end());
+        } catch (const std::exception& ex) {
+            LogError("failed to install bundle binary " + location + ": " + ex.what());
+        } catch (...) {
+            LogError("failed to install bundle binary " + location + ": unknown error");
+        }
     }
     LogInfo("installed " + std::to_string(installed.size()) + " bundle(s)");
 
@@ -183,8 +222,14 @@ void InstallBundles(cppmicroservices::BundleContext context,
         bool started = false;
         for (auto& bundle : installed) {
             if (bundle.GetSymbolicName() == bundle_name) {
-                LogInfo("starting bundle: " + bundle_name);
-                bundle.Start();
+                try {
+                    LogInfo("starting bundle: " + bundle_name);
+                    bundle.Start();
+                } catch (const std::exception& ex) {
+                    LogError("failed to start bundle " + bundle_name + ": " + ex.what());
+                } catch (...) {
+                    LogError("failed to start bundle " + bundle_name + ": unknown error");
+                }
                 started = true;
             }
         }
@@ -211,7 +256,16 @@ int main(int argc, char* argv[]) {
         LogInfo("framework started");
 
         InstallBundles(framework.GetBundleContext(), config);
-        framework.WaitForStop(std::chrono::milliseconds::max());
+        while (true) {
+            if (g_stop_requested.exchange(false, std::memory_order_acq_rel)) {
+                framework.Stop();
+            }
+
+            const auto event = framework.WaitForStop(std::chrono::milliseconds(200));
+            if (event.GetType() != cppmicroservices::FrameworkEvent::Type::FRAMEWORK_WAIT_TIMEDOUT) {
+                break;
+            }
+        }
         g_framework.store(nullptr, std::memory_order_release);
         LogInfo("framework stopped");
         return 0;

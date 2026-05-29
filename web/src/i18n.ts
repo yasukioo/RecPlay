@@ -213,7 +213,10 @@ const EN_US: AppTranslations = {
     Recording: "Recording",
     RecordingPaused: "Recording Paused",
     Playing: "Playing",
+    PlaybackPaused: "Playback Paused",
     PlayingPaused: "Playback Paused",
+    Seeking: "Seeking",
+    Stopped: "Stopped",
     Unknown: "Unknown",
   },
   pluginStates: {
@@ -414,7 +417,10 @@ const ZH_CN: AppTranslations = {
     Recording: "录制中",
     RecordingPaused: "录制已暂停",
     Playing: "回放中",
+    PlaybackPaused: "回放已暂停",
     PlayingPaused: "回放已暂停",
+    Seeking: "定位中",
+    Stopped: "已停止",
     Unknown: "未知",
   },
   pluginStates: {

@@ -160,6 +160,9 @@ StatsSnapshot StatsCollector::GetSnapshot() const {
 
 void StatsCollector::OnUpdate(std::function<void(const StatsSnapshot&)> cb) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (callbacks_.size() >= kMaxCallbacks) {
+        callbacks_.erase(callbacks_.begin());
+    }
     callbacks_.push_back(std::move(cb));
 }
 

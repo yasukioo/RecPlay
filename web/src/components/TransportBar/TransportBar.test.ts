@@ -19,10 +19,11 @@ describe("resolveTransportCommand", () => {
 
   it("maps playback controls based on session state", () => {
     expect(resolveTransportCommand("play", "Idle")).toBe("playPlayback");
-    expect(resolveTransportCommand("play", "PlayingPaused")).toBe("playPlayback");
+    expect(resolveTransportCommand("play", "Stopped" as never)).toBe("playPlayback");
+    expect(resolveTransportCommand("play", "PlaybackPaused" as never)).toBe("playPlayback");
     expect(resolveTransportCommand("pause", "Playing")).toBe("pausePlayback");
     expect(resolveTransportCommand("stop", "Playing")).toBe("stopPlayback");
-    expect(resolveTransportCommand("stop", "PlayingPaused")).toBe("stopPlayback");
+    expect(resolveTransportCommand("stop", "PlaybackPaused" as never)).toBe("stopPlayback");
   });
 
   it("returns null for unsupported state and control combinations", () => {
@@ -81,6 +82,17 @@ describe("resolveGlobalShortcut", () => {
 
     expect(
       transportModel.resolveGlobalShortcut({
+        code: "Space",
+        key: " ",
+        altKey: false,
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+      }, "PlaybackPaused" as never),
+    ).toEqual({ type: "transport", control: "play" });
+
+    expect(
+      transportModel.resolveGlobalShortcut({
         code: "KeyR",
         key: "r",
         altKey: false,
@@ -98,7 +110,7 @@ describe("resolveGlobalShortcut", () => {
         ctrlKey: false,
         metaKey: false,
         shiftKey: false,
-      }, "PlayingPaused"),
+      }, "PlaybackPaused" as never),
     ).toEqual({ type: "transport", control: "stop" });
   });
 

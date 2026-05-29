@@ -166,6 +166,31 @@ void TestCapturedPacketsPopulateTimestamps() {
 #endif
 }
 
+void TestInvalidJsonFailsCleanly() {
+    UdpProtocolService service;
+
+    bool captureThrew = false;
+    bool captureStarted = false;
+    try {
+        captureStarted = service.StartCapture("{invalid", [](recplay::PacketPtr) {});
+    } catch (...) {
+        captureThrew = true;
+    }
+
+    bool replayThrew = false;
+    bool replayStarted = false;
+    try {
+        replayStarted = service.StartReplay("{invalid");
+    } catch (...) {
+        replayThrew = true;
+    }
+
+    Expect(!captureThrew, "invalid UDP capture JSON should not throw");
+    Expect(!replayThrew, "invalid UDP replay JSON should not throw");
+    Expect(!captureStarted, "invalid UDP capture JSON should fail cleanly");
+    Expect(!replayStarted, "invalid UDP replay JSON should fail cleanly");
+}
+
 } // namespace
 
 int main() {
@@ -175,6 +200,7 @@ int main() {
         TestReplayLifecycle();
         TestCaptureAndReplayStopIndependently();
         TestCapturedPacketsPopulateTimestamps();
+        TestInvalidJsonFailsCleanly();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

@@ -6,6 +6,7 @@
 #include "IStatsService.h"
 
 #include <cstddef>
+#include <limits>
 #include <exception>
 #include <iostream>
 #include <stdexcept>
@@ -36,7 +37,7 @@ public:
     void PauseRecording() override {}
     void ResumeRecording() override {}
     void StopRecording() override {}
-    bool OpenForPlayback(const std::string&) override { return false; }
+    bool OpenForPlayback(const std::string&, const std::string& = "{}") override { return false; }
     void Play(double) override {}
     void Pause() override {}
     void SeekTo(uint64_t) override {}
@@ -182,6 +183,47 @@ void TestStaleSubscriptionsDoNotBroadcastAfterRebinding() {
     server.Stop();
 }
 
+void TestStatsBroadcastSanitizesNonFiniteNumbers() {
+    FakeSessionService session;
+    FakeStatsService stats;
+    WebSocketServer server(&session, &stats);
+
+    Expect(server.Start(), "websocket server should start for non-finite stats test");
+
+    stats.snapshot.total_packets = 1;
+    stats.snapshot.total_drops = 2;
+    stats.snapshot.total_throughput_mbps = std::numeric_limits<double>::infinity();
+    stats.snapshot.cpu_usage_percent = std::numeric_limits<double>::quiet_NaN();
+    stats.Emit();
+
+    const auto messages = server.GetBroadcastMessages();
+    Expect(messages.size() == 1, "server should emit one stats message");
+    Expect(messages[0].find("\"total_throughput_mbps\":0") != std::string::npos,
+           "stats message should sanitize non-finite throughput");
+    Expect(messages[0].find("\"cpu_usage_percent\":null") != std::string::npos,
+           "stats message should serialize non-finite cpu usage as null");
+
+    server.Stop();
+}
+
+void TestBroadcastHistoryHasBoundedSize() {
+    WebSocketServer server;
+    Expect(server.Start(), "websocket server should start for bounded history test");
+
+    for (size_t i = 0; i < 300; ++i) {
+        server.Broadcast("{\"type\":\"manual\",\"seq\":" + std::to_string(i) + "}");
+    }
+
+    const auto messages = server.GetBroadcastMessages();
+    Expect(messages.size() == 256, "broadcast history should be bounded");
+    Expect(messages.front().find("\"seq\":44") != std::string::npos,
+           "oldest retained message should reflect trimmed history");
+    Expect(messages.back().find("\"seq\":299") != std::string::npos,
+           "newest message should remain available");
+
+    server.Stop();
+}
+
 } // namespace
 
 int main() {
@@ -191,6 +233,8 @@ int main() {
         TestBroadcastUsesConfiguredTransport();
         TestSubscriptionsAreRefreshedAfterServiceInjection();
         TestStaleSubscriptionsDoNotBroadcastAfterRebinding();
+        TestStatsBroadcastSanitizesNonFiniteNumbers();
+        TestBroadcastHistoryHasBoundedSize();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

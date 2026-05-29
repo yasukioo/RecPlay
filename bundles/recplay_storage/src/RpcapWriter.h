@@ -45,7 +45,9 @@ private:
     uint64_t current_chunk_id_ = 0;
     uint64_t first_packet_ts_ = 0;
     uint64_t last_packet_ts_ = 0;
+    uint64_t last_keyframe_ts_ = 0;
     uint64_t packets_written_ = 0;
+    uint64_t estimated_chunk_bytes_ = 0;
     ICodecService* codec_service_ = nullptr;
 };
 

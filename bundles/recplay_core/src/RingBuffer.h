@@ -61,7 +61,7 @@ public:
         return (head - tail + Capacity) & kMask;
     }
 
-    size_t GetCapacity() const { return Capacity; }
+    size_t GetCapacity() const { return Capacity - 1; }
 
     bool IsEmpty() const { return Size() == 0; }
     bool IsFull() const { return Size() == Capacity - 1; }

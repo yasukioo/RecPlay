@@ -8,7 +8,10 @@ export type SessionState =
   | "Recording"
   | "RecordingPaused"
   | "Playing"
+  | "PlaybackPaused"
   | "PlayingPaused"
+  | "Seeking"
+  | "Stopped"
   | "Unknown";
 
 export interface SessionTransition {

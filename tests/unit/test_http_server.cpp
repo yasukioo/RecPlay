@@ -7,7 +7,14 @@
 #include "IStatsService.h"
 #include "WebRootLocator.h"
 
+#if __has_include(<nlohmann/json.hpp>)
+#define RECPLAY_TEST_HAS_JSON 1
+#else
+#define RECPLAY_TEST_HAS_JSON 0
+#endif
+
 #include <cstddef>
+#include <limits>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -49,7 +56,7 @@ public:
     void PauseRecording() override { pause_record_called = true; }
     void ResumeRecording() override { resume_record_called = true; }
     void StopRecording() override { stop_record_called = true; }
-    bool OpenForPlayback(const std::string& path) override {
+    bool OpenForPlayback(const std::string& path, const std::string& = "{}") override {
         open_playback_called = true;
         last_open_path = path;
         return open_playback_result;
@@ -209,6 +216,27 @@ void TestStatsSnapshotResponse() {
            "body should include actual cpu usage percent");
 }
 
+void TestStatsSnapshotResponseSanitizesNonFiniteNumbers() {
+    FakeSessionService session;
+    FakeStatsService stats;
+    stats.snapshot.total_throughput_mbps = std::numeric_limits<double>::infinity();
+    stats.snapshot.drop_rate = std::numeric_limits<double>::quiet_NaN();
+    stats.snapshot.write_latency_p99_ms = -std::numeric_limits<double>::infinity();
+    stats.snapshot.cpu_usage_percent = std::numeric_limits<double>::quiet_NaN();
+    HttpServer server(&session, &stats);
+
+    const auto response = server.HandleRequest("GET", "/api/stats", "");
+    Expect(response.status_code == 200, "stats endpoint should still return 200 for non-finite values");
+    Expect(response.body.find("\"total_throughput_mbps\":0") != std::string::npos,
+           "throughput should be sanitized to a valid JSON number");
+    Expect(response.body.find("\"drop_rate\":0") != std::string::npos,
+           "drop rate should be sanitized to a valid JSON number");
+    Expect(response.body.find("\"write_latency_p99_ms\":0") != std::string::npos,
+           "latency should be sanitized to a valid JSON number");
+    Expect(response.body.find("\"cpu_usage_percent\":null") != std::string::npos,
+           "cpu usage should become null when the source value is non-finite");
+}
+
 void TestRuntimeRoutes() {
     FakeSessionService session;
     FakeStatsService stats;
@@ -238,6 +266,8 @@ void TestRuntimeRoutes() {
     server.SetRuntimeCatalog(&runtime);
 
     auto response = server.HandleRequest("GET", "/api/plugins", "");
+
+#if RECPLAY_TEST_HAS_JSON
     Expect(response.status_code == 200, "plugins route should return 200");
     Expect(response.body.find("\"id\":\"UDP\"") != std::string::npos,
            "plugins route should include plugin identifier");
@@ -286,6 +316,52 @@ void TestRuntimeRoutes() {
     Expect(runtime.mappings.size() == 1, "set mappings route should replace mappings");
     Expect(runtime.mappings[0].target_topic == "/out/camera",
            "set mappings route should forward target topic");
+#else
+    Expect(response.status_code == 500,
+           "plugins route should report missing JSON support when nlohmann_json is unavailable");
+
+    response = server.HandleRequest("GET", "/api/plugins/UDP", "");
+    Expect(response.status_code == 500,
+           "plugin detail route should report missing JSON support when nlohmann_json is unavailable");
+
+    response = server.HandleRequest(
+        "POST",
+        "/api/plugins/UDP/config",
+        R"({"config_fields":[{"key":"address","label":"Address","value":"239.9.9.9"}]})");
+    Expect(response.status_code == 500,
+           "plugin config route should report missing JSON support when nlohmann_json is unavailable");
+    Expect(runtime.saved_plugin_id.empty(),
+           "plugin config should not be persisted without JSON support");
+
+    response = server.HandleRequest("POST", "/api/plugins/UDP/start", "");
+    Expect(response.status_code == 500,
+           "plugin start route should surface missing JSON support in its detail response");
+    Expect(runtime.started_plugin_id == "UDP",
+           "plugin start should still target the selected plugin before detail serialization fails");
+
+    response = server.HandleRequest("POST", "/api/plugins/UDP/stop", "");
+    Expect(response.status_code == 500,
+           "plugin stop route should surface missing JSON support in its detail response");
+    Expect(runtime.stopped_plugin_id == "UDP",
+           "plugin stop should still target the selected plugin before detail serialization fails");
+
+    response = server.HandleRequest("GET", "/api/channels", "");
+    Expect(response.status_code == 500,
+           "channels route should report missing JSON support when nlohmann_json is unavailable");
+
+    response = server.HandleRequest("GET", "/api/mappings", "");
+    Expect(response.status_code == 500,
+           "mappings route should report missing JSON support when nlohmann_json is unavailable");
+
+    response = server.HandleRequest(
+        "POST",
+        "/api/mappings",
+        R"({"mappings":[{"source_topic":"/in/camera","target_topic":"/out/camera"}]})");
+    Expect(response.status_code == 500,
+           "set mappings route should report missing JSON support when nlohmann_json is unavailable");
+    Expect(!runtime.set_mappings_called,
+           "set mappings should not invoke the runtime catalog without JSON support");
+#endif
 }
 
 void TestRuntimeRoutesRequireRuntimeCatalog() {
@@ -344,6 +420,55 @@ void TestStaticFileRoutes() {
 
     response = server.HandleRequest("GET", "/assets/missing.js", "");
     Expect(response.status_code == 404, "missing asset should return 404");
+
+    std::filesystem::remove_all(tempRoot);
+}
+
+void TestStaticFileRoutesRejectOversizedAssets() {
+    const auto tempRoot =
+        std::filesystem::temp_directory_path() / "recplay_http_server_large_static_test";
+    std::filesystem::remove_all(tempRoot);
+    std::filesystem::create_directories(tempRoot / "assets");
+
+    {
+        std::ofstream indexFile(tempRoot / "index.html", std::ios::binary);
+        indexFile << "<!doctype html><html><body>RecPlay</body></html>";
+    }
+    {
+        std::ofstream assetFile(tempRoot / "assets" / "big.bin", std::ios::binary);
+        assetFile.seekp((16 * 1024 * 1024), std::ios::beg);
+        assetFile.put('\0');
+    }
+
+    HttpServer server(nullptr, nullptr);
+    Expect(server.SetStaticRoot(tempRoot.string()), "static root should be accepted for large asset");
+
+    const auto response = server.HandleRequest("GET", "/assets/big.bin", "");
+    Expect(response.status_code == 413, "oversized static asset should be rejected");
+
+    std::filesystem::remove_all(tempRoot);
+}
+
+void TestStaticFileRoutesAllowWindowsCaseDifferences() {
+    const auto tempRoot =
+        std::filesystem::temp_directory_path() / "recplay_http_server_case_static_test";
+    std::filesystem::remove_all(tempRoot);
+    std::filesystem::create_directories(tempRoot / "Assets");
+
+    {
+        std::ofstream indexFile(tempRoot / "index.html", std::ios::binary);
+        indexFile << "<!doctype html><html><body>RecPlay</body></html>";
+    }
+    {
+        std::ofstream assetFile(tempRoot / "Assets" / "Case.js", std::ios::binary);
+        assetFile << "console.log('case');";
+    }
+
+    HttpServer server(nullptr, nullptr);
+    Expect(server.SetStaticRoot(tempRoot.string()), "static root should be accepted for case test");
+
+    const auto response = server.HandleRequest("GET", "/Assets/Case.js", "");
+    Expect(response.status_code == 200, "static path should serve file even if canonical casing differs");
 
     std::filesystem::remove_all(tempRoot);
 }
@@ -635,7 +760,7 @@ void TestErrorResponseEscapesJsonMessage() {
         void PauseRecording() override {}
         void ResumeRecording() override {}
         void StopRecording() override {}
-        bool OpenForPlayback(const std::string& path) override {
+        bool OpenForPlayback(const std::string& path, const std::string& = "{}") override {
             last_open_path = path;
             return false;
         }
@@ -663,8 +788,25 @@ void TestErrorResponseEscapesJsonMessage() {
         R"({"file_path":"broken\"name.rpcap"})");
 
     Expect(response.status_code == 400, "failed playback open should return 400");
+    Expect(session.last_open_path == "broken\"name.rpcap",
+           "playback open should decode escaped quotes before forwarding file path");
     Expect(response.body.find("\\\"") != std::string::npos,
            "error response should escape embedded quotes in JSON body: " + response.body);
+}
+
+void TestPlaybackOpenDecodesEscapedWindowsPath() {
+    FakeSessionService session;
+    FakeStatsService stats;
+    HttpServer server(&session, &stats);
+
+    const auto response = server.HandleRequest(
+        "POST",
+        "/api/session/playback/open",
+        R"({"file_path":"C:\\captures\\demo.rpcap"})");
+
+    Expect(response.status_code == 200, "playback open should accept escaped Windows-style paths");
+    Expect(session.last_open_path == "C:\\captures\\demo.rpcap",
+           "playback open should unescape Windows-style path separators");
 }
 
 void TestRunningStateTransitions() {
@@ -681,16 +823,30 @@ void TestRunningStateTransitions() {
     Expect(!server.IsRunning(), "server should report stopped after second stop");
 }
 
+void TestSecondHttpServerInstanceCannotStartWhileFirstIsActive() {
+    HttpServer first(nullptr, nullptr);
+    HttpServer second(nullptr, nullptr);
+
+    Expect(first.Start("127.0.0.1", 0), "first server should start");
+    Expect(!second.Start("127.0.0.1", 0),
+           "second server instance should fail while another server is active");
+
+    first.Stop();
+}
+
 } // namespace
 
 int main() {
     try {
         TestSessionStateResponse();
         TestStatsSnapshotResponse();
+        TestStatsSnapshotResponseSanitizesNonFiniteNumbers();
         TestRuntimeRoutes();
         TestRuntimeRoutesRequireRuntimeCatalog();
         TestUnknownRouteResponse();
         TestStaticFileRoutes();
+        TestStaticFileRoutesRejectOversizedAssets();
+        TestStaticFileRoutesAllowWindowsCaseDifferences();
         TestWebRootResolution();
         TestUnavailableServicesReturn503();
         TestPlaybackCommandRoutes();
@@ -699,7 +855,9 @@ int main() {
         TestPlaybackInvalidStateResponses();
         TestRemainingSessionRoutes();
         TestErrorResponseEscapesJsonMessage();
+        TestPlaybackOpenDecodesEscapedWindowsPath();
         TestRunningStateTransitions();
+        TestSecondHttpServerInstanceCannotStartWhileFirstIsActive();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

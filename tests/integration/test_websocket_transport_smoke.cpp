@@ -62,7 +62,7 @@ public:
     void PauseRecording() override {}
     void ResumeRecording() override {}
     void StopRecording() override {}
-    bool OpenForPlayback(const std::string&) override { return false; }
+    bool OpenForPlayback(const std::string&, const std::string& = "{}") override { return false; }
     void Play(double) override {}
     void Pause() override {}
     void SeekTo(uint64_t) override {}

@@ -52,10 +52,12 @@ private:
 
     bool LoadConfig(const std::string& configJson, RuntimeConfig& config) const;
     void StartAcceptLoop();
+#if RECPLAY_HAS_BOOST_ASIO
     void StartReadLoop(
         const std::shared_ptr<boost::asio::ip::tcp::socket>& socket,
         const std::shared_ptr<std::array<uint8_t, 65536>>& buffer);
     void RemoveCaptureSocket(const std::shared_ptr<boost::asio::ip::tcp::socket>& socket);
+#endif
     void ResetIoRuntimeIfUnused();
 
     mutable std::mutex mutex_;

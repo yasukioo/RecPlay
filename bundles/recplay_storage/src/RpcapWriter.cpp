@@ -84,7 +84,9 @@ bool RpcapWriter::Create(const std::string& path,
     current_chunk_id_ = 0;
     first_packet_ts_ = 0;
     last_packet_ts_ = 0;
+    last_keyframe_ts_ = 0;
     packets_written_ = 0;
+    estimated_chunk_bytes_ = 0;
 
     if (!WriteBytes(&header_, sizeof(header_))) {
         backend_->Close();
@@ -116,31 +118,23 @@ bool RpcapWriter::WritePacket(PacketPtr pkt) {
     }
     last_packet_ts_ = pkt->t_capture;
     chunk_.push_back(pkt);
-
-    uint64_t estimated_chunk_size = 0;
-    for (const auto& item : chunk_) {
-        if (!item) {
-            continue;
-        }
-        estimated_chunk_size += sizeof(item->t_capture) +
-            sizeof(item->t_origin) +
-            sizeof(item->t_record) +
-            sizeof(item->channel_id) +
-            sizeof(item->sequence) +
-            sizeof(item->protocol_id) +
-            sizeof(item->flags) +
-            sizeof(uint32_t) + item->payload.size() +
-            sizeof(uint32_t) + item->topic.size();
-    }
+    estimated_chunk_bytes_ += sizeof(pkt->t_capture) +
+        sizeof(pkt->t_origin) +
+        sizeof(pkt->t_record) +
+        sizeof(pkt->channel_id) +
+        sizeof(pkt->sequence) +
+        sizeof(pkt->protocol_id) +
+        sizeof(pkt->flags) +
+        sizeof(uint32_t) + pkt->payload.size() +
+        sizeof(uint32_t) + pkt->topic.size();
 
     const bool force_keyframe =
         (pkt->flags & kFlagKeyframe) != 0 ||
         packets_written_ == 0 ||
-        (pkt->t_capture >= first_packet_ts_ &&
-         (pkt->t_capture - first_packet_ts_) >=
-             ((footer_entries_.size() + 1) * kKeyframeIntervalNs));
+        (pkt->t_capture >= last_keyframe_ts_ &&
+         (pkt->t_capture - last_keyframe_ts_) >= kKeyframeIntervalNs);
 
-    if (estimated_chunk_size >= kChunkFlushThresholdBytes || force_keyframe) {
+    if (estimated_chunk_bytes_ >= kChunkFlushThresholdBytes || force_keyframe) {
         return FlushChunk(force_keyframe);
     }
 
@@ -187,24 +181,26 @@ bool RpcapWriter::FlushChunk(bool force_keyframe) {
 
     const auto chunk_offset = current_offset_;
     if (footer_entries_.empty() || force_keyframe) {
-        footer_entries_.push_back(FooterEntry{chunk_.front()->t_capture, chunk_offset});
+        last_keyframe_ts_ = chunk_.front()->t_capture;
+        footer_entries_.push_back(FooterEntry{last_keyframe_ts_, chunk_offset});
     }
 
     const auto payload = BuildChunkPayload();
-    std::vector<uint8_t> stored_payload = payload;
+    std::vector<uint8_t> stored_payload;
     if (!codec_.empty()) {
         auto compressed_payload = codec_service_->Compress(payload.data(), payload.size());
         if (payload.size() > 0 && compressed_payload.empty()) {
             return false;
         }
 
-        stored_payload.clear();
         stored_payload.reserve(sizeof(uint64_t) + compressed_payload.size());
         AppendScalar(stored_payload, static_cast<uint64_t>(payload.size()));
         stored_payload.insert(
             stored_payload.end(),
             compressed_payload.begin(),
             compressed_payload.end());
+    } else {
+        stored_payload = payload;
     }
 
     const auto payload_size = static_cast<uint64_t>(stored_payload.size());
@@ -220,6 +216,7 @@ bool RpcapWriter::FlushChunk(bool force_keyframe) {
 
     packets_written_ += packet_count;
     chunk_.clear();
+    estimated_chunk_bytes_ = 0;
     return true;
 }
 

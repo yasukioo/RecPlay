@@ -277,6 +277,31 @@ void TestServerCaptureAcceptsSequentialConnections() {
 #endif
 }
 
+void TestInvalidJsonFailsCleanly() {
+    TcpProtocolService service;
+
+    bool captureThrew = false;
+    bool captureStarted = false;
+    try {
+        captureStarted = service.StartCapture("{invalid", [](recplay::PacketPtr) {});
+    } catch (...) {
+        captureThrew = true;
+    }
+
+    bool replayThrew = false;
+    bool replayStarted = false;
+    try {
+        replayStarted = service.StartReplay("{invalid");
+    } catch (...) {
+        replayThrew = true;
+    }
+
+    Expect(!captureThrew, "invalid TCP capture JSON should not throw");
+    Expect(!replayThrew, "invalid TCP replay JSON should not throw");
+    Expect(!captureStarted, "invalid TCP capture JSON should fail cleanly");
+    Expect(!replayStarted, "invalid TCP replay JSON should fail cleanly");
+}
+
 } // namespace
 
 int main() {
@@ -287,6 +312,7 @@ int main() {
         TestCaptureAndReplayStopIndependently();
         TestCapturedPacketsPopulateTimestamps();
         TestServerCaptureAcceptsSequentialConnections();
+        TestInvalidJsonFailsCleanly();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;
