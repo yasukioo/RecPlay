@@ -42,9 +42,9 @@ public:
 
 private:
     struct RuntimeConfig {
-        std::string address = "0.0.0.0";
+        std::string address = "239.1.1.1";
         std::string bind_interface = "0.0.0.0";
-        unsigned short port = 0;
+        unsigned short port = 5000;
         int recv_buf = 0;
         uint32_t channel_id = 0;
         std::string channel_name = "udp";
@@ -52,6 +52,7 @@ private:
     };
 
     bool LoadConfig(const std::string& configJson, RuntimeConfig& config) const;
+    bool LoadReplayConfigs(const std::string& configJson, std::vector<RuntimeConfig>& configs) const;
     void StartReceiveLoop();
     void ResetIoRuntimeIfUnused();
 
@@ -61,13 +62,13 @@ private:
     std::vector<ChannelInfo> channels_;
     PacketCallback capture_callback_;
     RuntimeConfig capture_config_;
-    RuntimeConfig replay_config_;
+    std::vector<RuntimeConfig> replay_configs_;
 
 #if RECPLAY_HAS_BOOST_ASIO
     std::unique_ptr<boost::asio::io_context> io_context_;
     std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
     std::unique_ptr<boost::asio::ip::udp::socket> capture_socket_;
-    std::unique_ptr<boost::asio::ip::udp::socket> replay_socket_;
+    std::vector<std::unique_ptr<boost::asio::ip::udp::socket>> replay_sockets_;
     boost::asio::ip::udp::endpoint remote_endpoint_;
     std::array<uint8_t, 65536> receive_buffer_{};
     std::thread io_thread_;

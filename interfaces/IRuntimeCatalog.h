@@ -20,16 +20,21 @@ struct PluginRuntimeInfo {
     std::string name;
     std::string version;
     std::string state;
+    std::string kind;
+    std::string protocol;
+    std::string desc;
     std::string bundle_path;
     std::vector<PluginConfigFieldInfo> config_fields;
 };
 
 struct RuntimeChannelInfo {
     std::string id;
+    std::string name;
     std::string topic;
     std::string direction;
     std::string protocol;
     std::string plugin_id;
+    uint32_t numeric_id = 0;
 };
 
 struct RuntimeTopicMapping {

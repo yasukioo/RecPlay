@@ -63,8 +63,7 @@ export function resolveTransportCommand(
         state === "Idle" ||
         state === "Unknown" ||
         state === "Stopped" ||
-        state === "PlaybackPaused" ||
-        state === "PlayingPaused"
+        state === "PlaybackPaused"
       ) {
         return "playPlayback";
       }
@@ -84,7 +83,6 @@ export function resolveTransportCommand(
       if (
         state === "Playing" ||
         state === "PlaybackPaused" ||
-        state === "PlayingPaused" ||
         state === "Seeking"
       ) {
         return "stopPlayback";

@@ -75,6 +75,7 @@ struct StatsSnapshot {
     double total_throughput_mbps = 0.0;
     uint64_t total_packets = 0;
     uint64_t total_drops = 0;
+    uint64_t total_bytes = 0;        // cumulative bytes captured across all protocols
     double drop_rate = 0.0;
     double write_latency_p99_ms = 0.0;
     uint32_t ringbuf_used = 0;

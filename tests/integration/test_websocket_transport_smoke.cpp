@@ -69,9 +69,13 @@ public:
     void SetSpeed(double) override {}
     void SetLoopRange(uint64_t, uint64_t) override {}
     void Stop() override {}
+    void Reset() override {}
     uint64_t GetDuration() const override { return 0; }
     uint64_t GetCurrentPosition() const override { return 0; }
     double GetCurrentSpeed() const override { return 1.0; }
+    PlaybackPacketSnapshot GetCurrentPlaybackPacket() const override { return {}; }
+    std::vector<ReplayTarget> GetReplayTargets() const override { return {}; }
+    void SetReplayTargets(const std::vector<ReplayTarget>&) override {}
 
     void Emit(SessionState from, SessionState to) const {
         if (callback) {

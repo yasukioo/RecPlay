@@ -4,6 +4,7 @@
 #pragma once
 
 #include "FilterMappingEngine.h"
+#include "ICoreService.h"
 #include "InjectorBus.h"
 #include "IndexBuilder.h"
 #include "ObjectPool.h"
@@ -24,8 +25,9 @@ namespace recplay {
 class IProtocolService;
 class IStorageService;
 class ICodecService;
+class IStatsService;
 
-class CoreEngine {
+class CoreEngine final : public ICoreService {
 public:
     CoreEngine();
 
@@ -37,18 +39,20 @@ public:
 
     void SetStorageService(IStorageService* storage);
     void SetCodecService(ICodecService* codec);
+    void SetStatsService(IStatsService* stats);
     IStorageService* Storage() const;
     ICodecService* Codec() const;
 
     void AttachProtocol(const std::string& name, IProtocolService* protocol);
     void DetachProtocol(const std::string& name);
-    bool StartProtocolCapture(const std::string& name, const std::string& configJson);
-    void StopProtocolCapture(const std::string& name);
+    bool StartProtocolCapture(const std::string& name, const std::string& configJson) override;
+    void StopProtocolCapture(const std::string& name) override;
     bool StartProtocolReplay(const std::string& name, const std::string& configJson);
     void StopProtocolReplay(const std::string& name);
     void DispatchPacketToReplayingProtocols(PacketPtr pkt);
     std::vector<std::string> GetAttachedProtocolNames() const;
     std::vector<ChannelInfo> GetChannelsForProtocol(const std::string& name) const;
+    void SetTopicMappings(const std::vector<CoreTopicMapping>& mappings) override;
 
 private:
     using ProtocolQueue = SPSCRingBuffer<PacketPtr, 1024>;
@@ -79,6 +83,7 @@ private:
     std::map<std::string, std::shared_ptr<ProtocolRuntime>> protocols_;
     IStorageService* storage_ = nullptr;
     ICodecService* codec_ = nullptr;
+    IStatsService* stats_ = nullptr;
 };
 
 } // namespace recplay

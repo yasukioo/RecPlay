@@ -6,6 +6,7 @@ export const THEME_STORAGE_KEY = "recplay-theme";
 
 interface StorageReader {
   getItem: (key: string) => string | null;
+  setItem?: (key: string, value: string) => void;
 }
 
 interface ThemeStoreState {
@@ -24,11 +25,16 @@ export function getInitialTheme(storage: StorageReader | null = resolveStorage()
 
 export const useThemeStore = create<ThemeStoreState>((set) => ({
   theme: getInitialTheme(),
-  setTheme: (theme) => set({ theme }),
+  setTheme: (theme) => {
+    persistTheme(theme);
+    set({ theme });
+  },
   toggleTheme: () =>
-    set((current) => ({
-      theme: current.theme === "dark" ? "light" : "dark",
-    })),
+    set((current) => {
+      const theme = current.theme === "dark" ? "light" : "dark";
+      persistTheme(theme);
+      return { theme };
+    }),
 }));
 
 function resolveStorage(): StorageReader | null {
@@ -37,4 +43,8 @@ function resolveStorage(): StorageReader | null {
   }
 
   return window.localStorage;
+}
+
+function persistTheme(theme: ThemeMode): void {
+  resolveStorage()?.setItem?.(THEME_STORAGE_KEY, theme);
 }

@@ -17,6 +17,7 @@
 
 #include <exception>
 #include <iostream>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -70,11 +71,13 @@ public:
                 if (acceptError) {
                     return;
                 }
+                connections_.fetch_add(1, std::memory_order_acq_rel);
 
                 std::array<uint8_t, 256> buffer{};
                 while (true) {
                     boost::system::error_code readError;
                     const auto bytesRead = socket.read_some(boost::asio::buffer(buffer), readError);
+                    bytes_received_.fetch_add(bytesRead, std::memory_order_acq_rel);
                     if (readError == boost::asio::error::eof || bytesRead == 0) {
                         break;
                     }
@@ -95,10 +98,20 @@ public:
         }
     }
 
+    size_t ConnectionCount() const {
+        return connections_.load(std::memory_order_acquire);
+    }
+
+    size_t BytesReceived() const {
+        return bytes_received_.load(std::memory_order_acquire);
+    }
+
 private:
     boost::asio::io_context io_context_;
     boost::asio::ip::tcp::acceptor acceptor_;
     std::thread thread_;
+    std::atomic<size_t> connections_{0};
+    std::atomic<size_t> bytes_received_{0};
 };
 #endif
 
@@ -158,6 +171,36 @@ void TestReplayLifecycle() {
     const bool started = service.StartReplay(config);
     Expect(!started, "replay should fail cleanly when asio/json are unavailable");
     Expect(!service.IsReplaying(), "service should remain stopped without dependencies");
+#endif
+}
+
+void TestReplayFanoutSupportsMultipleTargets() {
+#if RECPLAY_TEST_HAS_BOOST_ASIO && RECPLAY_TEST_HAS_JSON
+    TcpProtocolService service;
+    LoopbackTcpServer serverA;
+    LoopbackTcpServer serverB;
+    serverA.Start();
+    serverB.Start();
+
+    const std::string config =
+        std::string("[") +
+        R"({"mode":"client","host":"127.0.0.1","port":)" + std::to_string(serverA.Port()) + "}," +
+        R"({"mode":"client","host":"127.0.0.1","port":)" + std::to_string(serverB.Port()) + "}]" ;
+
+    Expect(service.StartReplay(config), "multi-target TCP replay should start");
+
+    auto packet = std::make_shared<recplay::Packet>();
+    packet->payload = {0xaa, 0xbb, 0xcc, 0xdd};
+    Expect(service.SendPacket(packet), "multi-target TCP replay should send packet to all targets");
+
+    Expect(WaitUntil([&] { return serverA.ConnectionCount() >= 1 && serverA.BytesReceived() >= 4; }, std::chrono::milliseconds(500)),
+           "first TCP target should receive replay payload");
+    Expect(WaitUntil([&] { return serverB.ConnectionCount() >= 1 && serverB.BytesReceived() >= 4; }, std::chrono::milliseconds(500)),
+           "second TCP target should receive replay payload");
+
+    service.StopReplay();
+    serverA.Stop();
+    serverB.Stop();
 #endif
 }
 
@@ -309,6 +352,7 @@ int main() {
         TestSchemaIncludesTcpFields();
         TestCaptureLifecycleAndChannels();
         TestReplayLifecycle();
+        TestReplayFanoutSupportsMultipleTargets();
         TestCaptureAndReplayStopIndependently();
         TestCapturedPacketsPopulateTimestamps();
         TestServerCaptureAcceptsSequentialConnections();

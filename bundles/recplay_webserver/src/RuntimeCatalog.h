@@ -13,14 +13,14 @@
 
 namespace recplay {
 
-class CoreEngine;
+class ICoreService;
 class IProtocolService;
 
 class RuntimeCatalog final : public IRuntimeCatalog {
 public:
     RuntimeCatalog() = default;
 
-    void SetCoreEngine(CoreEngine* core);
+    void SetCoreService(ICoreService* core);
     void UpsertProtocol(const std::string& id,
                         std::shared_ptr<IProtocolService> service,
                         std::string bundlePath,
@@ -57,7 +57,7 @@ private:
     void ApplyMappingsLocked() const;
 
     mutable std::mutex mutex_;
-    CoreEngine* core_ = nullptr;
+    ICoreService* core_ = nullptr;
     std::map<std::string, ProtocolEntry> protocols_;
     std::vector<RuntimeTopicMapping> mappings_;
 };

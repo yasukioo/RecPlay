@@ -19,6 +19,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <vector>
 #include <thread>
 #include <stdexcept>
 #include <string>
@@ -44,6 +45,58 @@ bool WaitUntil(Predicate&& predicate, std::chrono::milliseconds timeout) {
     }
     return predicate();
 }
+
+#if RECPLAY_TEST_HAS_BOOST_ASIO
+class LoopbackUdpReceiver {
+public:
+    LoopbackUdpReceiver()
+        : socket_(
+            io_context_,
+            boost::asio::ip::udp::endpoint(
+                boost::asio::ip::make_address("127.0.0.1"),
+                0)) {}
+
+    ~LoopbackUdpReceiver() { Stop(); }
+
+    unsigned short Port() const {
+        return socket_.local_endpoint().port();
+    }
+
+    void Start() {
+        thread_ = std::thread([this] {
+            std::array<uint8_t, 256> buffer{};
+            boost::asio::ip::udp::endpoint remote;
+            boost::system::error_code ec;
+            const auto bytesRead = socket_.receive_from(boost::asio::buffer(buffer), remote, 0, ec);
+            if (!ec && bytesRead > 0) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                payload_.assign(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(bytesRead));
+            }
+        });
+    }
+
+    void Stop() {
+        boost::system::error_code ec;
+        socket_.cancel(ec);
+        socket_.close(ec);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    std::vector<uint8_t> Payload() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return payload_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    boost::asio::io_context io_context_;
+    boost::asio::ip::udp::socket socket_;
+    std::thread thread_;
+    std::vector<uint8_t> payload_;
+};
+#endif
 
 void TestSchemaIncludesUdpFields() {
     UdpProtocolService service;
@@ -95,6 +148,36 @@ void TestReplayLifecycle() {
 #else
     Expect(!started, "replay should fail cleanly when asio/json are unavailable");
     Expect(!service.IsReplaying(), "service should remain stopped without dependencies");
+#endif
+}
+
+void TestReplayFanoutSupportsMultipleTargets() {
+#if RECPLAY_TEST_HAS_BOOST_ASIO && RECPLAY_TEST_HAS_JSON
+    UdpProtocolService service;
+    LoopbackUdpReceiver receiverA;
+    LoopbackUdpReceiver receiverB;
+    receiverA.Start();
+    receiverB.Start();
+
+    const std::string config =
+        std::string("[") +
+        R"({"address":"127.0.0.1","interface":"0.0.0.0","port":)" + std::to_string(receiverA.Port()) + "}," +
+        R"({"address":"127.0.0.1","interface":"0.0.0.0","port":)" + std::to_string(receiverB.Port()) + "}]" ;
+
+    Expect(service.StartReplay(config), "multi-target UDP replay should start");
+
+    auto packet = std::make_shared<recplay::Packet>();
+    packet->payload = {0xde, 0xad, 0xbe, 0xef};
+    Expect(service.SendPacket(packet), "multi-target UDP replay should send packet to all targets");
+
+    Expect(WaitUntil([&] { return receiverA.Payload().size() == 4; }, std::chrono::milliseconds(500)),
+           "first UDP target should receive replay payload");
+    Expect(WaitUntil([&] { return receiverB.Payload().size() == 4; }, std::chrono::milliseconds(500)),
+           "second UDP target should receive replay payload");
+
+    service.StopReplay();
+    receiverA.Stop();
+    receiverB.Stop();
 #endif
 }
 
@@ -198,6 +281,7 @@ int main() {
         TestSchemaIncludesUdpFields();
         TestCaptureLifecycleAndChannels();
         TestReplayLifecycle();
+        TestReplayFanoutSupportsMultipleTargets();
         TestCaptureAndReplayStopIndependently();
         TestCapturedPacketsPopulateTimestamps();
         TestInvalidJsonFailsCleanly();

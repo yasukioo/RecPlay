@@ -135,7 +135,6 @@ function getRecordStatusClasses(state: SessionState): string {
       return "border-hmi-warning/40 bg-hmi-warning/10 text-hmi-warning";
     case "Playing":
     case "PlaybackPaused":
-    case "PlayingPaused":
     case "Seeking":
       return "border-hmi-accent/40 bg-hmi-accent/10 text-hmi-accent";
     case "Idle":

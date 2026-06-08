@@ -78,6 +78,7 @@ target_include_directories(recplay_session_tests
 target_link_libraries(recplay_session_tests
     PRIVATE
         recplay_interfaces
+        recplay_json
 )
 
 add_test(NAME recplay_session_tests COMMAND recplay_session_tests)
@@ -237,13 +238,18 @@ add_test(NAME recplay_rpcap_writer_reader_tests COMMAND recplay_rpcap_writer_rea
 add_executable(recplay_webserver_tests
     unit/test_http_server.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/HttpServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/WebSocketServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/EventLogBuffer.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/StaticFileHandler.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/WebRootLocator.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/RpcapReader.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/IoBackendFactory.cpp
 )
 
 target_include_directories(recplay_webserver_tests
     PRIVATE
         ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src
         ${PROJECT_SOURCE_DIR}/interfaces
 )
 
@@ -251,6 +257,7 @@ target_link_libraries(recplay_webserver_tests
     PRIVATE
         recplay_interfaces
         recplay_json
+        recplay_zstd
         recplay_drogon
 )
 
@@ -259,6 +266,7 @@ add_test(NAME recplay_webserver_tests COMMAND recplay_webserver_tests)
 add_executable(recplay_websocket_tests
     unit/test_websocket_server.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/WebSocketServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/EventLogBuffer.cpp
 )
 
 target_include_directories(recplay_websocket_tests
@@ -279,14 +287,18 @@ add_executable(recplay_websocket_transport_smoke_tests
     integration/test_websocket_transport_smoke.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/HttpServer.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/WebSocketServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/EventLogBuffer.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/RecPlayWebSocketController.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/StaticFileHandler.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/WebRootLocator.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/RpcapReader.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/IoBackendFactory.cpp
 )
 
 target_include_directories(recplay_websocket_transport_smoke_tests
     PRIVATE
         ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src
         ${PROJECT_SOURCE_DIR}/interfaces
 )
 
@@ -294,6 +306,7 @@ target_link_libraries(recplay_websocket_transport_smoke_tests
     PRIVATE
         recplay_interfaces
         recplay_json
+        recplay_zstd
         recplay_drogon
 )
 
@@ -328,12 +341,17 @@ add_test(NAME recplay_record_playback_tests COMMAND recplay_record_playback_test
 add_executable(recplay_webserver_integration_tests
     integration/test_webserver.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/HttpServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/WebSocketServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/EventLogBuffer.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/StaticFileHandler.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/RpcapReader.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/IoBackendFactory.cpp
 )
 
 target_include_directories(recplay_webserver_integration_tests
     PRIVATE
         ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src
         ${PROJECT_SOURCE_DIR}/interfaces
 )
 
@@ -341,6 +359,7 @@ target_link_libraries(recplay_webserver_integration_tests
     PRIVATE
         recplay_interfaces
         recplay_json
+        recplay_zstd
         recplay_drogon
 )
 
@@ -349,12 +368,17 @@ add_test(NAME recplay_webserver_integration_tests COMMAND recplay_webserver_inte
 add_executable(recplay_runtime_smoke_tests
     integration/test_runtime_smoke.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/HttpServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/WebSocketServer.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/EventLogBuffer.cpp
     ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src/StaticFileHandler.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/RpcapReader.cpp
+    ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src/IoBackendFactory.cpp
 )
 
 target_include_directories(recplay_runtime_smoke_tests
     PRIVATE
         ${PROJECT_SOURCE_DIR}/bundles/recplay_webserver/src
+        ${PROJECT_SOURCE_DIR}/bundles/recplay_storage/src
         ${PROJECT_SOURCE_DIR}/interfaces
 )
 
@@ -362,6 +386,7 @@ target_link_libraries(recplay_runtime_smoke_tests
     PRIVATE
         recplay_interfaces
         recplay_json
+        recplay_zstd
         recplay_drogon
 )
 
@@ -396,3 +421,37 @@ add_test(
         -DRECPLAY_SOURCE_DIR=${PROJECT_SOURCE_DIR}
         -P ${PROJECT_SOURCE_DIR}/tests/cmake/verify_vcpkg_overlay.cmake
 )
+
+# Test targets recompile bundle sources that #include <spdlog/spdlog.h>, which
+# pulls in vcpkg's external fmt (v11). Unlike the bundles (which link
+# recplay_spdlog), the test executables otherwise miss fmt's compiled symbols
+# (e.g. fmt::detail::assert_fail) and fail to link. Link recplay_spdlog into
+# every test target so spdlog -> fmt::fmt is resolved transitively; it is an
+# INTERFACE target, so it is harmless for the few tests that don't use spdlog.
+set(_recplay_test_targets
+    recplay_stats_tests
+    recplay_udp_tests
+    recplay_tcp_tests
+    recplay_session_tests
+    recplay_storage_tests
+    recplay_ringbuffer_tests
+    recplay_timeline_tests
+    recplay_state_machine_tests
+    recplay_object_pool_tests
+    recplay_index_builder_tests
+    recplay_injector_tests
+    recplay_rpcap_writer_reader_tests
+    recplay_webserver_tests
+    recplay_websocket_tests
+    recplay_websocket_transport_smoke_tests
+    recplay_record_playback_tests
+    recplay_webserver_integration_tests
+    recplay_runtime_smoke_tests
+    recplay_bundle_path_resolution_tests
+    recplay_vcpkg_overlay_setup_tests
+)
+foreach(_recplay_test_target IN LISTS _recplay_test_targets)
+    if(TARGET ${_recplay_test_target})
+        target_link_libraries(${_recplay_test_target} PRIVATE recplay_spdlog)
+    endif()
+endforeach()

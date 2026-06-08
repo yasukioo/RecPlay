@@ -8,6 +8,8 @@
 #include "RpcapWriter.h"
 
 #include <atomic>
+#include <mutex>
+#include <string>
 
 namespace recplay {
 
@@ -30,6 +32,8 @@ public:
     PacketPtr ReadNext() override;
     bool HasMore() const override;
     std::vector<uint64_t> GetKeyframeTimestamps() const override;
+    std::optional<RecordingFileInfo> ProbeFile(const std::string& path) const override;
+    std::vector<uint64_t> GetDensity(uint32_t buckets) const override;
 
     bool IsWriting() const override;
     bool IsReading() const override;
@@ -39,6 +43,8 @@ private:
     RpcapReader reader_;
     std::atomic<bool> writing_{false};
     std::atomic<bool> reading_{false};
+    mutable std::mutex path_mutex_;
+    std::string current_path_;
 };
 
 } // namespace recplay

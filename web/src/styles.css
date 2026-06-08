@@ -1,6 +1,19 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap");
 @import "tailwindcss";
+@import "./drr.css";
 
-/* HMI Industrial Dark Theme */
+/*
+ * RecPlay frontend styles.
+ *
+ * Layer 1 — ./drr.css: the "DRR — Data Record & Replay" design system ported
+ *   verbatim from docs/RecPlay _.html (tokens + .app/.titlebar/.tool/.panel/...).
+ *   The new shell (views/AppShell.tsx + views/*) is built on these classes.
+ *
+ * Layer 2 — the hmi-* @theme below: legacy tokens from the phase-8 layout so the
+ *   older components (RecordPanel, MonitorDashboard, ...) still compile/preview
+ *   while CODEX folds them into the new workbenches. Safe to delete once the
+ *   migration in CODEX_PLAN.md 阶段 8R is complete.
+ */
 @theme {
   --color-hmi-bg: #1a1d23;
   --color-hmi-surface: #22262e;
@@ -15,29 +28,6 @@
   --color-hmi-danger: #ef5350;
 }
 
-html {
-  color-scheme: dark;
-}
-
-html[data-theme="light"] {
-  color-scheme: light;
-  --color-hmi-bg: #eef2f6;
-  --color-hmi-surface: #f8fafc;
-  --color-hmi-surface-alt: #e2e8f0;
-  --color-hmi-border: #c7d0db;
-  --color-hmi-text: #16202a;
-  --color-hmi-text-muted: #526171;
-  --color-hmi-accent: #0b84c6;
-  --color-hmi-accent-dim: #005f97;
-  --color-hmi-success: #2e7d32;
-  --color-hmi-warning: #b86b00;
-  --color-hmi-danger: #c62828;
-}
-
-body {
-  @apply m-0 bg-hmi-bg font-mono text-hmi-text transition-colors duration-150;
-}
-
 #root {
-  @apply h-screen w-screen overflow-hidden;
+  min-height: 100vh;
 }

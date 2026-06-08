@@ -5,13 +5,3 @@ target_compile_definitions(recplay_webserver
         RECPLAY_BUILD_ROOT="${CMAKE_BINARY_DIR}"
         RECPLAY_SOURCE_ROOT="${PROJECT_SOURCE_DIR}"
 )
-
-target_include_directories(recplay_webserver
-    PRIVATE
-        ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src
-)
-
-target_link_libraries(recplay_webserver
-    PRIVATE
-        recplay_core
-)

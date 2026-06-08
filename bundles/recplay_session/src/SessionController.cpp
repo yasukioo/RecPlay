@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 #include <utility>
 
 #if __has_include(<spdlog/spdlog.h>)
@@ -22,6 +23,14 @@
 #define RECPLAY_HAS_JSON 1
 #else
 #define RECPLAY_HAS_JSON 0
+#endif
+
+// <windows.h> (pulled in transitively, e.g. via spdlog) defines CreateFile as a
+// macro aliasing CreateFileA/W. Since it is included after IStorageService.h, it
+// would rewrite storage->CreateFile(...) into CreateFileA(...). Undo it here so
+// the IStorageService::CreateFile member call resolves correctly.
+#ifdef CreateFile
+#undef CreateFile
 #endif
 
 namespace recplay {
@@ -198,6 +207,112 @@ std::vector<std::string> InferReplayProtocolsFromConfig(const std::string& repla
     return protocols;
 }
 
+std::string BuildJsonObjectLiteral(const std::map<std::string, std::string>& values) {
+#if RECPLAY_HAS_JSON
+    nlohmann::json document = nlohmann::json::object();
+    for (const auto& [key, value] : values) {
+        document[key] = value;
+    }
+    return document.dump();
+#else
+    std::ostringstream stream;
+    stream << "{";
+    bool first = true;
+    for (const auto& [key, value] : values) {
+        if (!first) {
+            stream << ",";
+        }
+        first = false;
+        stream << "\"" << key << "\":\"" << value << "\"";
+    }
+    stream << "}";
+    return stream.str();
+#endif
+}
+
+bool ReplayTargetHasRunnableConfig(const ISessionService::ReplayTarget& target);
+
+std::vector<std::string> BuildReplayProtocolsFromTargets(
+    const std::vector<ISessionService::ReplayTarget>& targets) {
+    std::vector<std::string> protocols;
+    for (const auto& target : targets) {
+        if (!ReplayTargetHasRunnableConfig(target) || target.protocol.empty()) {
+            continue;
+        }
+        if (std::find(protocols.begin(), protocols.end(), target.protocol) == protocols.end()) {
+            protocols.push_back(target.protocol);
+        }
+    }
+    return protocols;
+}
+
+std::string BuildReplayConfigForProtocol(
+    const std::vector<ISessionService::ReplayTarget>& targets,
+    const std::string& protocol,
+    const std::string& fallbackConfig) {
+    std::vector<std::map<std::string, std::string>> configs;
+    for (const auto& target : targets) {
+        if (!target.enabled || target.protocol != protocol) {
+            continue;
+        }
+        configs.push_back(target.config);
+    }
+
+    if (configs.empty()) {
+        return fallbackConfig;
+    }
+
+#if RECPLAY_HAS_JSON
+    if (configs.size() == 1) {
+        return BuildJsonObjectLiteral(configs.front());
+    }
+    nlohmann::json document = nlohmann::json::array();
+    for (const auto& config : configs) {
+        nlohmann::json item = nlohmann::json::object();
+        for (const auto& [key, value] : config) {
+            item[key] = value;
+        }
+        document.push_back(std::move(item));
+    }
+    return document.dump();
+#else
+    return BuildJsonObjectLiteral(configs.front());
+#endif
+}
+
+bool ReplayTargetHasRunnableConfig(const ISessionService::ReplayTarget& target) {
+    if (!target.enabled) {
+        return false;
+    }
+
+    if (target.protocol == "UDP") {
+        return target.config.find("address") != target.config.end() &&
+               target.config.find("port") != target.config.end();
+    }
+    if (target.protocol == "TCP") {
+        return target.config.find("host") != target.config.end() &&
+               target.config.find("port") != target.config.end();
+    }
+
+    return !target.config.empty();
+}
+
+bool ReplayConfigIdentifiesProtocol(const std::string& protocol,
+                                    const std::string& replayConfigJson) {
+    const auto protocols = InferReplayProtocolsFromConfig(replayConfigJson);
+    return std::find(protocols.begin(), protocols.end(), protocol) != protocols.end();
+}
+
+bool HasRunnableReplayTargetForProtocol(const std::vector<ISessionService::ReplayTarget>& targets,
+                                        const std::string& protocol) {
+    return std::any_of(
+        targets.begin(),
+        targets.end(),
+        [&protocol](const ISessionService::ReplayTarget& target) {
+            return target.protocol == protocol && ReplayTargetHasRunnableConfig(target);
+        });
+}
+
 #if RECPLAY_HAS_JSON
 std::string ToJsonString(const nlohmann::json& value) {
     return value.dump();
@@ -267,6 +382,13 @@ bool SessionController::StartRecording(const std::string& configJson) {
         return false;
     }
 
+    // Allow restarting a new recording after a previous session ended (Stopped→Idle).
+    // Without this, the state machine would reject Stopped→Recording even though
+    // all resources have already been released by StopRecording/Stop.
+    if (machine_.GetState() == SessionState::Stopped) {
+        machine_.Transition(SessionState::Idle);
+    }
+
     auto* storage = engine_->Storage();
     if (storage == nullptr) {
         return false;
@@ -312,6 +434,8 @@ bool SessionController::StartRecording(const std::string& configJson) {
         std::lock_guard<std::mutex> lock(mutex_);
         active_record_protocols_ = std::move(started_protocols);
         current_record_path_ = request.output_path;
+        current_playback_file_.clear();
+        current_playback_packet_ = {};
         current_position_ns_ = 0;
         duration_ns_ = 0;
     }
@@ -351,6 +475,10 @@ void SessionController::StopRecording() {
             storage->FinalizeFile();
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current_playback_packet_ = {};
+    }
     machine_.Transition(SessionState::Stopped);
 }
 
@@ -372,19 +500,35 @@ bool SessionController::OpenForPlayback(const std::string& filePath,
     }
 
     const std::string replay_config = replayConfigJson.empty() ? "{}" : replayConfigJson;
-    auto protocol_names = CollectReplayProtocols(storage->GetChannels(), {});
-    if (protocol_names.empty()) {
-        protocol_names = InferReplayProtocolsFromConfig(replay_config);
+    std::vector<ReplayTarget> replay_targets;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        replay_targets = replay_targets_;
     }
+
+    auto protocol_names = BuildReplayProtocolsFromTargets(replay_targets);
     if (protocol_names.empty()) {
-        protocol_names = engine_->GetAttachedProtocolNames();
+        protocol_names = CollectReplayProtocols(storage->GetChannels(), {});
+        if (protocol_names.empty()) {
+            protocol_names = InferReplayProtocolsFromConfig(replay_config);
+        }
+        if (protocol_names.empty()) {
+            protocol_names = engine_->GetAttachedProtocolNames();
+        }
     }
 #if RECPLAY_HAS_SPDLOG
     spdlog::info("playback open: file={} inferred_protocols={}", filePath, protocol_names.size());
 #endif
     std::vector<std::string> replay_protocols;
     for (const auto& protocol_name : protocol_names) {
-        if (!engine_->StartProtocolReplay(protocol_name, replay_config)) {
+        if (protocol_name == "TCP" &&
+            !HasRunnableReplayTargetForProtocol(replay_targets, protocol_name) &&
+            !ReplayConfigIdentifiesProtocol(protocol_name, replay_config)) {
+            continue;
+        }
+        const std::string protocol_config =
+            BuildReplayConfigForProtocol(replay_targets, protocol_name, replay_config);
+        if (!engine_->StartProtocolReplay(protocol_name, protocol_config)) {
 #if RECPLAY_HAS_SPDLOG
             spdlog::error("playback open failed: protocol replay start failed for {}", protocol_name);
 #endif
@@ -392,6 +536,11 @@ bool SessionController::OpenForPlayback(const std::string& filePath,
                 engine_->StopProtocolReplay(started_name);
             }
             storage->CloseFile();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                active_replay_protocols_.clear();
+                RefreshReplayTargetStatusesLocked(&protocol_name);
+            }
             return false;
         }
         replay_protocols.push_back(protocol_name);
@@ -402,8 +551,10 @@ bool SessionController::OpenForPlayback(const std::string& filePath,
         std::lock_guard<std::mutex> lock(mutex_);
         current_playback_file_ = filePath;
         active_replay_protocols_ = std::move(replay_protocols);
+        current_playback_packet_ = {};
         duration_ns_ = header.duration_ns;
         current_position_ns_ = 0;
+        RefreshReplayTargetStatusesLocked();
     }
 
     engine_->Timeline().SetOrigin(0);
@@ -532,13 +683,34 @@ void SessionController::Stop() {
             storage->CloseFile();
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current_playback_packet_ = {};
+    }
     if (state == SessionState::Seeking) {
         machine_.Transition(SessionState::PlaybackPaused);
     }
     machine_.Transition(SessionState::Stopped);
 }
 
+void SessionController::Reset() {
+    // Transition from Stopped (or Idle) back to Idle so a new recording can start
+    // without restarting the process.  No-op if already Idle or in an active state.
+    const auto state = machine_.GetState();
+    if (state == SessionState::Stopped) {
+        machine_.Transition(SessionState::Idle);
+    }
+}
+
 uint64_t SessionController::GetDuration() const {
+    // During an active recording the file hasn't been finalised yet, so
+    // duration_ns_ is still 0.  Return the live timeline elapsed time instead
+    // so the HTTP /api/session/state and WebSocket stats reflect real elapsed time.
+    const auto state = machine_.GetState();
+    if (engine_ != nullptr &&
+        (state == SessionState::Recording || state == SessionState::RecordingPaused)) {
+        return engine_->Timeline().Now();
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     return duration_ns_;
 }
@@ -550,6 +722,22 @@ uint64_t SessionController::GetCurrentPosition() const {
 
 double SessionController::GetCurrentSpeed() const {
     return current_speed_.load(std::memory_order_acquire);
+}
+
+ISessionService::PlaybackPacketSnapshot SessionController::GetCurrentPlaybackPacket() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_playback_packet_;
+}
+
+std::vector<ISessionService::ReplayTarget> SessionController::GetReplayTargets() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return replay_targets_;
+}
+
+void SessionController::SetReplayTargets(const std::vector<ReplayTarget>& targets) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    replay_targets_ = targets;
+    RefreshReplayTargetStatusesLocked();
 }
 
 void SessionController::StopRecordingProtocols() {
@@ -579,6 +767,7 @@ void SessionController::StopReplayProtocols() {
         std::lock_guard<std::mutex> lock(mutex_);
         protocols = active_replay_protocols_;
         active_replay_protocols_.clear();
+        RefreshReplayTargetStatusesLocked();
     }
 
     for (const auto& protocol_name : protocols) {
@@ -625,6 +814,10 @@ void SessionController::DispatchPlaybackPacket(PacketPtr pkt) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         current_position_ns_ = pkt->t_capture;
+        current_playback_packet_.available = true;
+        current_playback_packet_.packet = *pkt;
+        current_playback_packet_.replay_timestamp_ns = engine_->Timeline().Now();
+        current_playback_packet_.writer = current_playback_file_;
         loop_start = loop_start_ns_;
         loop_end = loop_end_ns_;
     }
@@ -657,6 +850,29 @@ void SessionController::PublishState(SessionState from, SessionState next) {
         if (callback) {
             callback(from, next);
         }
+    }
+}
+
+void SessionController::RefreshReplayTargetStatusesLocked(const std::string* failingProtocol) {
+    for (auto& target : replay_targets_) {
+        if (!target.enabled) {
+            target.status = "idle";
+            continue;
+        }
+        if (!ReplayTargetHasRunnableConfig(target)) {
+            target.status = "error";
+            continue;
+        }
+        if (failingProtocol != nullptr && target.protocol == *failingProtocol) {
+            target.status = "error";
+            continue;
+        }
+
+        const bool protocolActive =
+            std::find(active_replay_protocols_.begin(),
+                      active_replay_protocols_.end(),
+                      target.protocol) != active_replay_protocols_.end();
+        target.status = protocolActive ? "active" : "idle";
     }
 }
 

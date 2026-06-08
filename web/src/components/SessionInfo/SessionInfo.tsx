@@ -23,7 +23,7 @@ export function SessionInfo() {
 
   useEffect(() => {
     listRecordingFiles()
-      .then((result) => setFiles(result.files))
+      .then((result) => setFiles(result.map((file) => file.name)))
       .catch(() => setFiles([]));
   }, [state]);
 
@@ -33,7 +33,6 @@ export function SessionInfo() {
   const isPlaying =
     state === "Playing" ||
     state === "PlaybackPaused" ||
-    state === "PlayingPaused" ||
     state === "Seeking" ||
     state === "Stopped";
 

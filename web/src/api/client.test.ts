@@ -5,6 +5,7 @@ import {
   getPluginDetail,
   getPlugins,
   getTopicMappings,
+  listRecordingFiles,
   openPlaybackFile,
   pausePlayback,
   pauseRecording,
@@ -153,5 +154,32 @@ describe("api client command routes", () => {
         }),
       }),
     );
+  });
+
+  it("preserves recording file path from the files api", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        files: [
+          {
+            name: "flight1.rpcap",
+            path: "data/flight1.rpcap",
+            size: 18041,
+            duration_ns: 2500000000,
+            channels: 2,
+            recorded_at: 1234567890,
+          },
+        ],
+      }),
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listRecordingFiles()).resolves.toEqual([
+      expect.objectContaining({
+        name: "flight1.rpcap",
+        path: "data/flight1.rpcap",
+      }),
+    ]);
   });
 });

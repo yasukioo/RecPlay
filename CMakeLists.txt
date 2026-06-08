@@ -37,6 +37,15 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin/$<CONFIG>)
 add_compile_definitions(_WIN32_WINNT=0x0601)
+
+# Source files contain UTF-8 (e.g. Chinese comments). MSVC otherwise reads them
+# as the system code page and fmt/spdlog's FMT_UNICODE static_assert fails
+# ("Unicode support requires compiling with /utf-8"). Set both source and
+# execution charset to UTF-8 for every target.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 enable_testing()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FixCppMicroServicesPackage.cmake)
@@ -127,8 +136,8 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/RecPlayBundle.cmake)
 
 add_subdirectory(bundles/recplay_core)
 add_subdirectory(bundles/recplay_session)
-add_subdirectory(bundles/recplay_webserver)
 add_subdirectory(bundles/recplay_storage)
+add_subdirectory(bundles/recplay_webserver)
 add_subdirectory(bundles/recplay_stats)
 add_subdirectory(bundles/protocol_udp)
 add_subdirectory(bundles/protocol_tcp)

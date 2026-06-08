@@ -3,8 +3,7 @@
 
 #include "RuntimeCatalog.h"
 
-#include "CoreEngine.h"
-#include "FilterMappingEngine.h"
+#include "ICoreService.h"
 #include "IProtocolService.h"
 
 #if __has_include(<nlohmann/json.hpp>)
@@ -45,6 +44,14 @@ std::string HumanizeKey(const std::string& key) {
     }
 
     return label;
+}
+
+std::string BuildPluginDescription(const std::string& protocol, const std::string& type) {
+    const std::string kind = type.empty() ? "Service" : type;
+    if (protocol.empty()) {
+        return kind;
+    }
+    return protocol + " " + kind;
 }
 
 #if RECPLAY_RUNTIME_CATALOG_HAS_JSON
@@ -111,7 +118,7 @@ std::string ResolveChannelDirection(const std::string& type) {
 
 } // namespace
 
-void RuntimeCatalog::SetCoreEngine(CoreEngine* core) {
+void RuntimeCatalog::SetCoreService(ICoreService* core) {
     std::lock_guard<std::mutex> lock(mutex_);
     core_ = core;
     if (core_ != nullptr) {
@@ -274,10 +281,12 @@ std::vector<RuntimeChannelInfo> RuntimeCatalog::ListChannels() const {
         for (const auto& channel : entry.service->GetChannels()) {
             channels.push_back(RuntimeChannelInfo{
                 id + ":" + std::to_string(channel.id),
+                channel.name,
                 channel.topic,
                 ResolveChannelDirection(entry.type),
                 channel.protocol,
                 id,
+                channel.id,
             });
         }
     }
@@ -307,6 +316,9 @@ std::optional<PluginRuntimeInfo> RuntimeCatalog::BuildPluginLocked(const std::st
     plugin.id = id;
     plugin.name = it->second.service->GetName();
     plugin.version = it->second.service->GetVersion();
+    plugin.kind = it->second.type;
+    plugin.protocol = id;
+    plugin.desc = BuildPluginDescription(id, it->second.type);
     plugin.state = it->second.service->IsCapturing() || it->second.service->IsReplaying()
         ? "active"
         : (it->second.last_error.empty() ? "inactive" : "error");
@@ -342,7 +354,7 @@ void RuntimeCatalog::ApplyMappingsLocked() const {
         }
     }
 
-    std::vector<FilterMappingEngine::MappingRule> compiledMappings;
+    std::vector<CoreTopicMapping> compiledMappings;
     for (const auto& mapping : mappings_) {
         const auto sourceIt = topicToChannel.find(mapping.source_topic);
         const auto targetIt = topicToChannel.find(mapping.target_topic);
@@ -350,14 +362,14 @@ void RuntimeCatalog::ApplyMappingsLocked() const {
             continue;
         }
 
-        compiledMappings.push_back(FilterMappingEngine::MappingRule{
+        compiledMappings.push_back(CoreTopicMapping{
             sourceIt->second,
             targetIt->second,
             mapping.target_topic,
         });
     }
 
-    core_->Filters().SetMappings(std::move(compiledMappings));
+    core_->SetTopicMappings(std::move(compiledMappings));
 }
 
 } // namespace recplay

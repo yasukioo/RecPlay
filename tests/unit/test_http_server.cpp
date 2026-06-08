@@ -4,7 +4,9 @@
 #include "HttpServer.h"
 #include "IRuntimeCatalog.h"
 #include "ISessionService.h"
+#include "IStorageService.h"
 #include "IStatsService.h"
+#include "WebSocketServer.h"
 #include "WebRootLocator.h"
 
 #if __has_include(<nlohmann/json.hpp>)
@@ -29,13 +31,16 @@ using recplay::HttpServer;
 using recplay::IStatsService;
 using recplay::IRuntimeCatalog;
 using recplay::ISessionService;
+using recplay::IStorageService;
 using recplay::PluginConfigFieldInfo;
 using recplay::PluginRuntimeInfo;
+using recplay::RecordingFileInfo;
 using recplay::RuntimeChannelInfo;
 using recplay::RuntimeTopicMapping;
 using recplay::SessionState;
 using recplay::StateCallback;
 using recplay::StatsSnapshot;
+using recplay::WebSocketServer;
 using recplay::ResolveWebRoot;
 
 void Expect(bool condition, const std::string& message) {
@@ -80,9 +85,13 @@ public:
         last_loop_end_ns = end;
     }
     void Stop() override { stop_called = true; }
+    void Reset() override { reset_called = true; }
     uint64_t GetDuration() const override { return duration; }
     uint64_t GetCurrentPosition() const override { return position; }
     double GetCurrentSpeed() const override { return speed; }
+    PlaybackPacketSnapshot GetCurrentPlaybackPacket() const override { return playback_packet; }
+    std::vector<ReplayTarget> GetReplayTargets() const override { return replay_targets; }
+    void SetReplayTargets(const std::vector<ReplayTarget>& targets) override { replay_targets = targets; }
 
     SessionState state = SessionState::Playing;
     uint64_t duration = 1000;
@@ -100,6 +109,7 @@ public:
     bool seek_called = false;
     bool loop_called = false;
     bool stop_called = false;
+    bool reset_called = false;
     bool set_speed_called = false;
     bool start_record_called = false;
     bool pause_record_called = false;
@@ -108,12 +118,14 @@ public:
     bool open_playback_called = false;
     bool start_record_result = true;
     bool open_playback_result = true;
+    PlaybackPacketSnapshot playback_packet;
+    std::vector<ReplayTarget> replay_targets;
 };
 
 class FakeStatsService final : public IStatsService {
 public:
     StatsSnapshot GetSnapshot() const override { return snapshot; }
-    void OnUpdate(std::function<void(const StatsSnapshot&)>) override {}
+    void OnUpdate(std::function<void(const StatsSnapshot&)> cb) override { callback = std::move(cb); }
     void RecordPacket(const std::string&, uint32_t, size_t) override {}
     void RecordDrop(const std::string&, uint64_t) override {}
     void RecordWriteLatency(double) override {}
@@ -121,6 +133,7 @@ public:
     void UpdateDiskQueue(uint64_t) override {}
 
     StatsSnapshot snapshot;
+    std::function<void(const StatsSnapshot&)> callback;
 };
 
 class FakeRuntimeCatalog final : public IRuntimeCatalog {
@@ -175,6 +188,35 @@ public:
     bool stop_plugin_result = true;
     bool set_topic_mappings_result = true;
     bool set_mappings_called = false;
+};
+
+class FakeStorageService final : public IStorageService {
+public:
+    bool CreateFile(const std::string&,
+                    const std::vector<recplay::ChannelInfo>&,
+                    const std::string&) override {
+        return false;
+    }
+    bool WritePacket(recplay::PacketPtr) override { return false; }
+    bool FinalizeFile() override { return false; }
+    bool OpenFile(const std::string&) override { return false; }
+    void CloseFile() override {}
+    recplay::RpcapHeader GetHeader() const override { return {}; }
+    std::vector<recplay::ChannelInfo> GetChannels() const override { return {}; }
+    bool SeekTo(uint64_t) override { return false; }
+    recplay::PacketPtr ReadNext() override { return nullptr; }
+    bool HasMore() const override { return false; }
+    bool IsWriting() const override { return false; }
+    bool IsReading() const override { return false; }
+    std::vector<uint64_t> GetKeyframeTimestamps() const override { return {}; }
+    std::optional<RecordingFileInfo> ProbeFile(const std::string& path) const override {
+        last_probe_path = path;
+        return file_info;
+    }
+    std::vector<uint64_t> GetDensity(uint32_t) const override { return {}; }
+
+    mutable std::string last_probe_path;
+    std::optional<RecordingFileInfo> file_info;
 };
 
 void TestSessionStateResponse() {
@@ -241,12 +283,16 @@ void TestRuntimeRoutes() {
     FakeSessionService session;
     FakeStatsService stats;
     FakeRuntimeCatalog runtime;
+    WebSocketServer websocket(&session, &stats);
     runtime.plugins = {
         PluginRuntimeInfo{
             "UDP",
             "UDP Protocol",
             "1.0.0",
             "inactive",
+            "Source",
+            "UDP",
+            "UDP Source",
             "bundles/protocol_udp.dll",
             {
                 PluginConfigFieldInfo{"address", "Address", "239.1.1.1"},
@@ -255,8 +301,8 @@ void TestRuntimeRoutes() {
         },
     };
     runtime.channels = {
-        RuntimeChannelInfo{"UDP:7", "/in/radar", "input", "UDP", "UDP"},
-        RuntimeChannelInfo{"TCP:8", "/out/radar", "output", "TCP", "TCP"},
+        RuntimeChannelInfo{"UDP:7", "Radar In", "/in/radar", "input", "UDP", "UDP", 7},
+        RuntimeChannelInfo{"TCP:8", "Radar Out", "/out/radar", "output", "TCP", "TCP", 8},
     };
     runtime.mappings = {
         RuntimeTopicMapping{"/in/radar", "/out/radar"},
@@ -264,6 +310,8 @@ void TestRuntimeRoutes() {
 
     HttpServer server(&session, &stats);
     server.SetRuntimeCatalog(&runtime);
+    server.SetWebSocketServer(&websocket);
+    websocket.Start();
 
     auto response = server.HandleRequest("GET", "/api/plugins", "");
 
@@ -273,6 +321,12 @@ void TestRuntimeRoutes() {
            "plugins route should include plugin identifier");
     Expect(response.body.find("\"bundle_path\":\"bundles/protocol_udp.dll\"") != std::string::npos,
            "plugins route should include bundle path");
+    Expect(response.body.find("\"kind\":\"Source\"") != std::string::npos,
+           "plugins route should include plugin kind");
+    Expect(response.body.find("\"protocol\":\"UDP\"") != std::string::npos,
+           "plugins route should include plugin protocol");
+    Expect(response.body.find("\"desc\":\"UDP Source\"") != std::string::npos,
+           "plugins route should include plugin description");
 
     response = server.HandleRequest("GET", "/api/plugins/UDP", "");
     Expect(response.status_code == 200, "plugin detail route should return 200");
@@ -299,8 +353,79 @@ void TestRuntimeRoutes() {
 
     response = server.HandleRequest("GET", "/api/channels", "");
     Expect(response.status_code == 200, "channels route should return 200");
+    Expect(response.body.find("\"name\":\"Radar Out\"") != std::string::npos,
+           "channels route should include channel names");
     Expect(response.body.find("\"direction\":\"output\"") != std::string::npos,
            "channels route should include channel directions");
+
+    response = server.HandleRequest("GET", "/api/playback/packet", "");
+    Expect(response.status_code == 200, "playback packet route should return 200");
+    Expect(response.body == "null", "playback packet route should currently degrade to null");
+
+    session.playback_packet.available = true;
+    session.playback_packet.packet.channel_id = 7;
+    session.playback_packet.packet.sequence = 42;
+    session.playback_packet.packet.protocol_id = static_cast<uint16_t>(recplay::ProtocolId::kUDP);
+    session.playback_packet.packet.t_record = 1234;
+    session.playback_packet.packet.topic = "/in/radar";
+    session.playback_packet.packet.payload = {0x01, 0x02, 0xa0};
+    session.playback_packet.replay_timestamp_ns = 5678;
+    session.playback_packet.writer = "capture.rpcap";
+
+    response = server.HandleRequest("GET", "/api/playback/packet", "");
+    Expect(response.body.find("\"channel\":7") != std::string::npos,
+           "playback packet route should include channel id");
+    Expect(response.body.find("\"plugin\":\"UDP\"") != std::string::npos,
+           "playback packet route should expose protocol as plugin label");
+    Expect(response.body.find("\"seq\":42") != std::string::npos,
+           "playback packet route should include packet sequence");
+    Expect(response.body.find("\"t_record\":1234") != std::string::npos,
+           "playback packet route should include record timestamp");
+    Expect(response.body.find("\"t_replay\":5678") != std::string::npos,
+           "playback packet route should include replay timestamp");
+    Expect(response.body.find("\"writer\":\"capture.rpcap\"") != std::string::npos,
+           "playback packet route should include writer label");
+    Expect(response.body.find("\"hex\":\"01 02 a0\"") != std::string::npos,
+           "playback packet route should include hex preview");
+
+    response = server.HandleRequest("GET", "/api/playback/targets", "");
+    Expect(response.status_code == 200, "playback targets route should return 200");
+    Expect(response.body.find("\"targets\":[]") != std::string::npos,
+           "playback targets route should start empty");
+
+    response = server.HandleRequest(
+        "POST",
+        "/api/playback/targets",
+        R"({"targets":[{"id":"udp-a","name":"UDP A","protocol":"UDP","enabled":true,"endpoint":"239.1.1.1:5000"},{"id":"tcp-a","name":"TCP A","protocol":"TCP","enabled":false,"endpoint":"127.0.0.1:9000"}]})");
+    Expect(response.status_code == 200, "set playback targets route should return 200");
+    Expect(response.body.find("\"id\":\"udp-a\"") != std::string::npos,
+           "set playback targets route should persist target ids");
+    Expect(response.body.find("\"endpoint\":\"239.1.1.1:5000\"") != std::string::npos,
+           "set playback targets route should echo endpoints");
+    Expect(session.replay_targets.size() == 2,
+           "set playback targets route should update session target state");
+
+    response = server.HandleRequest("GET", "/api/logs", "");
+    Expect(response.status_code == 200, "logs route should return 200");
+    Expect(response.body.find("\"entries\":[]") != std::string::npos,
+           "logs route should start empty before websocket events are recorded");
+
+    stats.snapshot.total_packets = 3;
+    stats.snapshot.total_drops = 1;
+    if (stats.callback) {
+        stats.callback(stats.snapshot);
+    }
+    if (session.callback) {
+        session.callback(SessionState::Idle, SessionState::Playing);
+    }
+
+    response = server.HandleRequest("GET", "/api/logs", "");
+    Expect(response.body.find("\"source\":\"stats\"") != std::string::npos,
+           "logs route should include stats events");
+    Expect(response.body.find("\"source\":\"session\"") != std::string::npos,
+           "logs route should include session events");
+    Expect(response.body.find("Idle -> Playing") != std::string::npos,
+           "logs route should include state transition message");
 
     response = server.HandleRequest("GET", "/api/mappings", "");
     Expect(response.status_code == 200, "mappings route should return 200");
@@ -362,6 +487,7 @@ void TestRuntimeRoutes() {
     Expect(!runtime.set_mappings_called,
            "set mappings should not invoke the runtime catalog without JSON support");
 #endif
+    websocket.Stop();
 }
 
 void TestRuntimeRoutesRequireRuntimeCatalog() {
@@ -770,9 +896,13 @@ void TestErrorResponseEscapesJsonMessage() {
         void SetSpeed(double) override {}
         void SetLoopRange(uint64_t, uint64_t) override {}
         void Stop() override {}
+        void Reset() override {}
         uint64_t GetDuration() const override { return 0; }
         uint64_t GetCurrentPosition() const override { return 0; }
         double GetCurrentSpeed() const override { return 1.0; }
+        PlaybackPacketSnapshot GetCurrentPlaybackPacket() const override { return {}; }
+        std::vector<ReplayTarget> GetReplayTargets() const override { return {}; }
+        void SetReplayTargets(const std::vector<ReplayTarget>&) override {}
 
         StateCallback callback;
         std::string last_open_path;
@@ -807,6 +937,81 @@ void TestPlaybackOpenDecodesEscapedWindowsPath() {
     Expect(response.status_code == 200, "playback open should accept escaped Windows-style paths");
     Expect(session.last_open_path == "C:\\captures\\demo.rpcap",
            "playback open should unescape Windows-style path separators");
+}
+
+void TestPlaybackOpenResolvesBasenameAgainstRecordingsDirectory() {
+    namespace fs = std::filesystem;
+
+    FakeSessionService session;
+    FakeStatsService stats;
+    HttpServer server(&session, &stats);
+
+    const fs::path temp_root = fs::temp_directory_path() / "recplay-open-file-test";
+    const fs::path recordings_dir = temp_root / "captures";
+    std::error_code ec;
+    fs::create_directories(recordings_dir, ec);
+    Expect(!ec, "should create temp recordings directory for playback open");
+
+    const fs::path recording_path = recordings_dir / "flight1.rpcap";
+    {
+        std::ofstream file(recording_path, std::ios::binary);
+        Expect(file.good(), "should create temp playback file");
+        file << "RPCP";
+    }
+
+    server.SetRecordingsDirectory(recordings_dir.string());
+    const auto response = server.HandleRequest(
+        "POST",
+        "/api/session/playback/open",
+        R"({"file_path":"flight1.rpcap"})");
+
+    Expect(response.status_code == 200, "playback open should resolve basename relative to recordings dir");
+    Expect(session.last_open_path == recording_path.string(),
+           "playback open should forward resolved full path from recordings dir");
+
+    fs::remove_all(temp_root, ec);
+}
+
+void TestFilesRouteIncludesFullPathForPlaybackRoundTrip() {
+    namespace fs = std::filesystem;
+
+    FakeSessionService session;
+    FakeStatsService stats;
+    FakeStorageService storage;
+    RecordingFileInfo fileInfo;
+    fileInfo.duration_ns = 123;
+    fileInfo.total_packets = 7;
+    fileInfo.creation_time = 456;
+    fileInfo.channel_count = 2;
+    storage.file_info = fileInfo;
+
+    const fs::path temp_root = fs::temp_directory_path() / "recplay-http-files-test";
+    const fs::path recordings_dir = temp_root / "captures";
+    std::error_code ec;
+    fs::create_directories(recordings_dir, ec);
+    Expect(!ec, "should create temp recordings directory");
+
+    const fs::path recording_path = recordings_dir / "flight1.rpcap";
+    {
+        std::ofstream file(recording_path, std::ios::binary);
+        Expect(file.good(), "should create temp recording");
+        file << "RPCP";
+    }
+
+    HttpServer server(&session, &stats);
+    server.SetStorageService(&storage);
+    server.SetRecordingsDirectory(recordings_dir.string());
+
+    const auto response = server.HandleRequest("GET", "/api/files", "");
+    Expect(response.status_code == 200, "files route should return 200");
+    Expect(response.body.find("\"name\":\"flight1.rpcap\"") != std::string::npos,
+           "files route should include file name: " + response.body);
+    Expect(response.body.find("\"path\":\"") != std::string::npos,
+           "files route should include full path for playback round-trip: " + response.body);
+    Expect(storage.last_probe_path == recording_path.string(),
+           "storage probe should receive full path");
+
+    fs::remove_all(temp_root, ec);
 }
 
 void TestRunningStateTransitions() {
@@ -856,6 +1061,8 @@ int main() {
         TestRemainingSessionRoutes();
         TestErrorResponseEscapesJsonMessage();
         TestPlaybackOpenDecodesEscapedWindowsPath();
+        TestPlaybackOpenResolvesBasenameAgainstRecordingsDirectory();
+        TestFilesRouteIncludesFullPathForPlaybackRoundTrip();
         TestRunningStateTransitions();
         TestSecondHttpServerInstanceCannotStartWhileFirstIsActive();
         return 0;

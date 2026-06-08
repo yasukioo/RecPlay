@@ -6,9 +6,11 @@
 #include "IoBackend.h"
 #include "Packet.h"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace recplay {
@@ -25,6 +27,9 @@ public:
     RpcapHeader GetHeader() const;
     std::vector<ChannelInfo> GetChannels() const;
     std::vector<uint64_t> GetKeyframeTimestamps() const;
+    // Per-chunk {timestamp_ns, packet_count}, read from chunk headers only (no
+    // payload decompression). Cheap O(chunks) scan for building event density.
+    std::vector<std::pair<uint64_t, uint64_t>> GetChunkPacketCounts() const;
 
 private:
     struct FooterEntry {

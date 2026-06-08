@@ -6,6 +6,9 @@
 #include <cstdint>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <WinSock2.h>
 #ifndef htonll
 static inline std::uint64_t htonll(std::uint64_t value) {

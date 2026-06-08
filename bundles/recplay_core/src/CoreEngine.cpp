@@ -5,6 +5,7 @@
 
 #include "ICodecService.h"
 #include "IProtocolService.h"
+#include "IStatsService.h"
 #include "IStorageService.h"
 
 #include <chrono>
@@ -28,6 +29,11 @@ void CoreEngine::SetStorageService(IStorageService* storage) {
 void CoreEngine::SetCodecService(ICodecService* codec) {
     std::lock_guard<std::mutex> lock(mutex_);
     codec_ = codec;
+}
+
+void CoreEngine::SetStatsService(IStatsService* stats) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stats_ = stats;
 }
 
 IStorageService* CoreEngine::Storage() const {
@@ -178,6 +184,21 @@ std::vector<ChannelInfo> CoreEngine::GetChannelsForProtocol(const std::string& n
     return runtime->service->GetChannels();
 }
 
+void CoreEngine::SetTopicMappings(const std::vector<CoreTopicMapping>& mappings) {
+    std::vector<FilterMappingEngine::MappingRule> compiledMappings;
+    compiledMappings.reserve(mappings.size());
+
+    for (const auto& mapping : mappings) {
+        compiledMappings.push_back(FilterMappingEngine::MappingRule{
+            mapping.source_channel_id,
+            mapping.target_channel_id,
+            mapping.target_topic,
+        });
+    }
+
+    filters_.SetMappings(std::move(compiledMappings));
+}
+
 std::shared_ptr<CoreEngine::ProtocolRuntime> CoreEngine::FindProtocolRuntime(
     const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -196,6 +217,22 @@ void CoreEngine::RunProtocolWorker(const std::shared_ptr<ProtocolRuntime>& runti
     while (runtime->worker_running.load(std::memory_order_acquire)) {
         auto pkt = runtime->queue->TryPop();
         if (pkt.has_value()) {
+            if (*pkt) {
+                IStatsService* stats;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    stats = stats_;
+                }
+                if (stats != nullptr) {
+                    stats->RecordPacket(runtime->name,
+                                        (*pkt)->channel_id,
+                                        (*pkt)->payload.size());
+                    // Keep ring-buffer state fresh so the UI cap-buffer chip is accurate.
+                    stats->UpdateRingBufferState(
+                        static_cast<uint32_t>(runtime->queue->Size()),
+                        static_cast<uint32_t>(runtime->queue->GetCapacity()));
+                }
+            }
             HandleCapturedPacket(std::move(*pkt));
             continue;
         }

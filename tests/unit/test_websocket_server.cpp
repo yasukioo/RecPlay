@@ -44,9 +44,13 @@ public:
     void SetSpeed(double) override {}
     void SetLoopRange(uint64_t, uint64_t) override {}
     void Stop() override {}
+    void Reset() override {}
     uint64_t GetDuration() const override { return 0; }
     uint64_t GetCurrentPosition() const override { return 0; }
     double GetCurrentSpeed() const override { return 1.0; }
+    PlaybackPacketSnapshot GetCurrentPlaybackPacket() const override { return {}; }
+    std::vector<ReplayTarget> GetReplayTargets() const override { return {}; }
+    void SetReplayTargets(const std::vector<ReplayTarget>&) override {}
 
     void Emit(SessionState from, SessionState to) const {
         if (callback) {
@@ -224,6 +228,30 @@ void TestBroadcastHistoryHasBoundedSize() {
     server.Stop();
 }
 
+void TestEventLogCapturesStatsAndStateChanges() {
+    FakeSessionService session;
+    FakeStatsService stats;
+    WebSocketServer server(&session, &stats);
+
+    Expect(server.Start(), "websocket server should start for event log test");
+
+    stats.snapshot.total_packets = 7;
+    stats.snapshot.total_drops = 2;
+    stats.Emit();
+    session.Emit(SessionState::Idle, SessionState::Playing);
+
+    const auto entries = server.GetEventLogEntries();
+    Expect(entries.size() == 2, "event log should capture stats and state events");
+    Expect(entries[0].source == "stats", "first event log entry should come from stats");
+    Expect(entries[0].message.find("packets=7") != std::string::npos,
+           "stats log entry should include packet count");
+    Expect(entries[1].source == "session", "second event log entry should come from session");
+    Expect(entries[1].message.find("Idle -> Playing") != std::string::npos,
+           "session log entry should include state transition");
+
+    server.Stop();
+}
+
 } // namespace
 
 int main() {
@@ -235,6 +263,7 @@ int main() {
         TestStaleSubscriptionsDoNotBroadcastAfterRebinding();
         TestStatsBroadcastSanitizesNonFiniteNumbers();
         TestBroadcastHistoryHasBoundedSize();
+        TestEventLogCapturesStatsAndStateChanges();
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << std::endl;

@@ -14,7 +14,9 @@ namespace recplay {
 
 class ISessionService;
 class IStatsService;
+class IStorageService;
 class IRuntimeCatalog;
+class WebSocketServer;
 
 struct HttpResponse {
     int status_code = 200;
@@ -34,7 +36,12 @@ public:
     void SetSessionService(ISessionService* session);
     void SetStatsService(IStatsService* stats);
     void SetRuntimeCatalog(IRuntimeCatalog* runtimeCatalog);
+    void SetStorageService(IStorageService* storage);
+    void SetWebSocketServer(WebSocketServer* webSocketServer);
     bool SetStaticRoot(const std::string& root);
+    // Directory scanned by GET /api/files for *.rpcap recordings. Set once at
+    // startup (before Start); defaults to the configured storage output dir.
+    void SetRecordingsDirectory(const std::string& directory);
     HttpResponse HandleRequest(const std::string& method,
                                const std::string& path,
                                const std::string& body) const;
@@ -42,6 +49,7 @@ public:
 private:
     HttpResponse HandleSessionState() const;
     HttpResponse HandleStats() const;
+    HttpResponse HandleSessionReset() const;
     HttpResponse HandleRecordStart(const std::string& body) const;
     HttpResponse HandleRecordPause() const;
     HttpResponse HandleRecordResume() const;
@@ -59,8 +67,16 @@ private:
     HttpResponse HandlePluginStart(const std::string& pluginId) const;
     HttpResponse HandlePluginStop(const std::string& pluginId) const;
     HttpResponse HandleChannels() const;
+    HttpResponse HandleFiles() const;
+    HttpResponse HandleMarkers() const;
+    HttpResponse HandlePlaybackPacket() const;
+    HttpResponse HandlePlaybackDensity() const;
+    HttpResponse HandleReplayTargets() const;
+    HttpResponse HandleSetReplayTargets(const std::string& body) const;
+    HttpResponse HandleLogs() const;
     HttpResponse HandleMappings() const;
     HttpResponse HandleSetMappings(const std::string& body) const;
+    void BroadcastReplayTargetsIfAvailable() const;
     static HttpResponse MakeJsonResponse(std::string body, int statusCode = 200);
     static HttpResponse MakeErrorResponse(int statusCode, const std::string& message);
     static std::string EscapeJsonString(const std::string& value);
@@ -73,7 +89,10 @@ private:
     std::atomic<ISessionService*> session_{nullptr};
     std::atomic<IStatsService*> stats_{nullptr};
     std::atomic<IRuntimeCatalog*> runtime_catalog_{nullptr};
+    std::atomic<IStorageService*> storage_{nullptr};
+    std::atomic<WebSocketServer*> websocket_server_{nullptr};
     StaticFileHandler static_files_;
+    std::string recordings_dir_{"data"};
 };
 
 } // namespace recplay

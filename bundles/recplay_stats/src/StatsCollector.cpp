@@ -257,6 +257,7 @@ StatsSnapshot StatsCollector::BuildSnapshotViewLocked(double intervalSeconds,
 
     snapshot.total_packets = total_packets_;
     snapshot.total_drops = total_drops_;
+    snapshot.total_bytes = total_bytes_;
     snapshot.write_latency_p99_ms = ComputeP99Locked(latency_window_ms_);
 
     if (hasPendingWindow) {

@@ -6,6 +6,16 @@
   <title>RecPlay Trajectory Viewer</title>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
+    /* phase badge colours */
+    .phase-badge { display: inline-block; padding: 3px 10px; border-radius: 999px;
+                   font-size: 12px; font-weight: 600; letter-spacing: 0.05em; }
+    .phase-TAXI_OUT,.phase-TAXI_IN  { background: rgba(148,163,184,0.15); color: #93a4c7; }
+    .phase-TAKEOFF  { background: rgba(251,191,36,0.18);  color: #fbbf24; }
+    .phase-CLIMB    { background: rgba(52,211,153,0.18);  color: #34d399; }
+    .phase-CRUISE   { background: rgba(110,231,255,0.18); color: #6ee7ff; }
+    .phase-DESCENT  { background: rgba(251,146,60,0.18);  color: #fb923c; }
+    .phase-APPROACH { background: rgba(251,113,133,0.18); color: #fb7185; }
+    .phase-LANDING  { background: rgba(167,139,250,0.18); color: #a78bfa; }
     :root {
       color-scheme: dark;
       --bg: #0b1020;
@@ -185,6 +195,10 @@
       </section>
       <section class="card">
         <h2>Latest Packet</h2>
+        <div style="margin-bottom:10px">
+          <span class="metric-label" style="font-size:12px">Phase</span><br>
+          <span class="phase-badge" id="phaseBadge">—</span>
+        </div>
         <div class="metrics">
           <div class="metric">
             <div class="metric-label">Flight</div>
@@ -202,7 +216,19 @@
             <div class="metric-label">Speed</div>
             <div class="metric-value" id="spd">-</div>
           </div>
+          <div class="metric">
+            <div class="metric-label">V/S (fpm)</div>
+            <div class="metric-value" id="vspd">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Heading</div>
+            <div class="metric-value" id="hdg">-</div>
+          </div>
         </div>
+      </section>
+      <section class="card">
+        <h2>Altitude History</h2>
+        <div id="altChart" style="height:140px"></div>
       </section>
       <section class="card">
         <h2>Packet Log</h2>
@@ -211,7 +237,9 @@
       <section class="card">
         <h2>Usage</h2>
         <div class="hint">
-          先运行 bridge，再打开这个页面。模拟器或回放重新发送相同 UDP 数据报后，航迹会在图上继续延伸。
+          先运行 bridge，再打开这个页面。<br>
+          模拟器：<code>python tools/flight_sim.py</code><br>
+          接收器：<code>python tools/recv.py</code>
         </div>
       </section>
     </aside>
@@ -220,7 +248,9 @@
   <script>
     const wsUrl = "ws://localhost:8765";
     const chart = echarts.init(document.getElementById("chart"), null, { renderer: "canvas" });
+    const altChart = echarts.init(document.getElementById("altChart"), null, { renderer: "canvas" });
     const points = [];
+    const altData = [];  // [seq, alt_m]
     const raw = [];
 
     const option = {
@@ -263,6 +293,27 @@
     };
     chart.setOption(option);
 
+    const altOption = {
+      backgroundColor: "transparent",
+      grid: { left: 44, right: 12, top: 8, bottom: 28 },
+      xAxis: { type: "value", show: false },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: "#93a4c7", fontSize: 10 },
+        splitLine: { lineStyle: { color: "rgba(148,163,184,0.1)" } },
+      },
+      series: [{
+        type: "line",
+        data: altData,
+        showSymbol: false,
+        smooth: true,
+        lineStyle: { width: 2, color: "#fbbf24" },
+        areaStyle: { color: "rgba(251,191,36,0.1)" },
+      }],
+      tooltip: { trigger: "axis", formatter: p => `${p[0].value[1].toFixed(0)} m` },
+    };
+    altChart.setOption(altOption);
+
     function setStatus(online, text) {
       document.getElementById("statusText").textContent = text;
       document.getElementById("statusDot").style.background = online ? "#89f7a1" : "#f87171";
@@ -288,8 +339,17 @@
     function updateMetrics(packet) {
       document.getElementById("flightId").textContent = packet.id ?? "-";
       document.getElementById("seq").textContent = packet.seq ?? "-";
-      document.getElementById("alt").textContent = `${Number(packet.alt_m ?? 0).toFixed(1)} m`;
+      document.getElementById("alt").textContent = `${Number(packet.alt_m ?? 0).toFixed(0)} m`;
       document.getElementById("spd").textContent = `${Number(packet.spd_kt ?? 0).toFixed(1)} kt`;
+      document.getElementById("vspd").textContent = packet.vspd_fpm != null
+        ? `${Number(packet.vspd_fpm).toFixed(0)}` : "-";
+      document.getElementById("hdg").textContent = packet.hdg_deg != null
+        ? `${Number(packet.hdg_deg).toFixed(1)}°` : "-";
+
+      const phase = packet.phase ?? "";
+      const badge = document.getElementById("phaseBadge");
+      badge.textContent = phase || "—";
+      badge.className = `phase-badge ${phase ? "phase-" + phase : ""}`;
     }
 
     function updateChart(packet) {
@@ -301,16 +361,21 @@
       points.push([x, y]);
       raw.push(packet);
       chart.setOption({
-        series: [
-          {
-            data: points,
-            markPoint: {
-              data: [{ name: "Current", coord: [x, y] }],
-            },
-          },
-        ],
+        series: [{
+          data: points,
+          markPoint: { data: [{ name: "Current", coord: [x, y] }] },
+        }],
       });
+
+      // altitude history (keep last 300 points)
+      const seq = Number(packet.seq ?? altData.length);
+      const alt = Number(packet.alt_m ?? 0);
+      altData.push([seq, alt]);
+      if (altData.length > 300) altData.shift();
+      altChart.setOption({ series: [{ data: altData }] });
+
       chart.resize();
+      altChart.resize();
     }
 
     function connect() {
@@ -344,7 +409,7 @@
       });
     }
 
-    window.addEventListener("resize", () => chart.resize());
+    window.addEventListener("resize", () => { chart.resize(); altChart.resize(); });
     connect();
   </script>
 </body>

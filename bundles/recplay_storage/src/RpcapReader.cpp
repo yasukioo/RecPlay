@@ -256,6 +256,31 @@ std::vector<uint64_t> RpcapReader::GetKeyframeTimestamps() const {
     return timestamps;
 }
 
+std::vector<std::pair<uint64_t, uint64_t>> RpcapReader::GetChunkPacketCounts() const {
+    std::vector<std::pair<uint64_t, uint64_t>> result;
+    if (!open_ || backend_ == nullptr) {
+        return result;
+    }
+    result.reserve(footer_entries_.size());
+    for (const auto& entry : footer_entries_) {
+        // Chunk layout: [chunk_id(8)][packet_count(8)][payload_size(8)][payload].
+        // Seek past chunk_id to read packet_count without touching the payload.
+        if (!backend_->Seek(static_cast<int64_t>(entry.chunk_offset + sizeof(uint64_t)))) {
+            continue;
+        }
+        uint64_t packet_count = 0;
+        if (backend_->Read(&packet_count, sizeof(packet_count)) !=
+            static_cast<IoSize>(sizeof(packet_count))) {
+            continue;
+        }
+        if (packet_count > kMaxChunkPacketCount) {
+            packet_count = 0;
+        }
+        result.emplace_back(entry.timestamp_ns, packet_count);
+    }
+    return result;
+}
+
 bool RpcapReader::ReadBytes(void* data, size_t size) {
     if (backend_ == nullptr) {
         return false;

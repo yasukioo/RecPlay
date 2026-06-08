@@ -19,7 +19,8 @@ bool SessionStateMachine::IsValidTransition(SessionState from, SessionState to) 
         case SessionState::RecordingPaused:
             return to == SessionState::Recording || to == SessionState::Stopped;
         case SessionState::Stopped:
-            return to == SessionState::Playing || to == SessionState::Idle;
+            return to == SessionState::Playing || to == SessionState::Idle ||
+                   to == SessionState::Recording;
         case SessionState::Playing:
             return to == SessionState::PlaybackPaused || to == SessionState::Seeking || to == SessionState::Stopped;
         case SessionState::PlaybackPaused:

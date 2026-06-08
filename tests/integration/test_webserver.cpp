@@ -74,10 +74,14 @@ public:
     void SetSpeed(double newSpeed) override { speed = newSpeed; }
     void SetLoopRange(uint64_t, uint64_t) override {}
     void Stop() override {}
+    void Reset() override {}
 
     uint64_t GetDuration() const override { return duration_ns; }
     uint64_t GetCurrentPosition() const override { return position_ns; }
     double GetCurrentSpeed() const override { return speed; }
+    PlaybackPacketSnapshot GetCurrentPlaybackPacket() const override { return {}; }
+    std::vector<ReplayTarget> GetReplayTargets() const override { return replay_targets; }
+    void SetReplayTargets(const std::vector<ReplayTarget>& targets) override { replay_targets = targets; }
 
     SessionState state = SessionState::Idle;
     uint64_t duration_ns = 321'000'000ULL;
@@ -88,6 +92,7 @@ public:
     std::string last_record_config;
     std::string last_open_path;
     StateCallback callback;
+    std::vector<ReplayTarget> replay_targets;
 };
 
 class FakeStatsService final : public IStatsService {

@@ -3,13 +3,25 @@ import type { StatsHistoryPoint, StatsSnapshot } from "../types";
 
 interface StatsStoreState extends StatsSnapshot {
   history: StatsHistoryPoint[];
+  /**
+   * Update snapshot values only (no history point added).
+   * Used by WebSocket pushes so non-recording real-time updates
+   * don't keep growing the waveform history.
+   */
   replaceSnapshot: (snapshot: Partial<StatsSnapshot>) => void;
+  /**
+   * Update snapshot AND append a history point.
+   * Called only from the recording polling loop (every 500 ms while recording).
+   */
+  recordSnapshot: (snapshot: Partial<StatsSnapshot>) => void;
+  clearHistory: () => void;
 }
 
 export const useStatsStore = create<StatsStoreState>((set) => ({
   total_throughput_mbps: 0,
   total_packets: 0,
   total_drops: 0,
+  total_bytes: 0,
   drop_rate: 0,
   write_latency_p99_ms: 0,
   ringbuf_used: 0,
@@ -19,12 +31,16 @@ export const useStatsStore = create<StatsStoreState>((set) => ({
   history: [],
 
   replaceSnapshot: (snapshot) =>
+    set((current) => ({ ...current, ...snapshot })),
+
+  recordSnapshot: (snapshot) =>
     set((current) => {
       const next = { ...current, ...snapshot };
       const point: StatsHistoryPoint = {
         timestamp: Date.now(),
         total_packets: next.total_packets,
         total_drops: next.total_drops,
+        total_bytes: next.total_bytes,
         total_throughput_mbps: next.total_throughput_mbps,
         drop_rate: next.drop_rate,
         write_latency_p99_ms: next.write_latency_p99_ms,
@@ -35,7 +51,9 @@ export const useStatsStore = create<StatsStoreState>((set) => ({
       };
       return {
         ...next,
-        history: [...current.history, point].slice(-30),
+        history: [...current.history, point].slice(-120),
       };
     }),
+
+  clearHistory: () => set((current) => ({ ...current, history: [] })),
 }));

@@ -30,7 +30,17 @@ function Invoke-RecPlayJson {
 
 Write-Host "RecPlay E2E flow"
 Write-Host '1. Start tools/udp_ws_bridge.py and open tools/trajectory_viewer.html.'
-Write-Host '2. Start tools/sim_aircraft.py when recording begins.'
+Write-Host '2. Start tools/flight_sim.py when recording begins.'
+
+# Verify RecPlay is reachable and show current session state.
+try {
+    $stateNow = Invoke-RecPlayJson -Method Get -Path "/api/session/state"
+    Write-Host ("RecPlay is online. Current session state: {0}" -f $stateNow.state)
+} catch {
+    Write-Error "Cannot reach RecPlay at $BaseUrl. Is it running?"
+    exit 1
+}
+
 Read-Host "Press Enter to start recording"
 
 $scriptRoot = Split-Path -Parent $PSCommandPath
@@ -57,7 +67,7 @@ Invoke-RecPlayJson -Method Post -Path "/api/session/record" -Body @{
     }
 } | Out-Null
 
-Write-Host "Recording started. Run the simulator now."
+Write-Host "Recording started. Run: python tools/flight_sim.py"
 Write-Host "Polling /api/stats every second. Press Ctrl+C to abort."
 try {
     while ($true) {

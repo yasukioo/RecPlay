@@ -34,14 +34,19 @@ public:
     void SetSpeed(double speed) override;
     void SetLoopRange(uint64_t startNs, uint64_t endNs) override;
     void Stop() override;
+    void Reset() override;
     uint64_t GetDuration() const override;
     uint64_t GetCurrentPosition() const override;
     double GetCurrentSpeed() const override;
+    PlaybackPacketSnapshot GetCurrentPlaybackPacket() const override;
+    std::vector<ReplayTarget> GetReplayTargets() const override;
+    void SetReplayTargets(const std::vector<ReplayTarget>& targets) override;
 
 private:
     void DispatchPlaybackPacket(PacketPtr pkt);
     void StopRecordingProtocols();
     void StopReplayProtocols();
+    void RefreshReplayTargetStatusesLocked(const std::string* failingProtocol = nullptr);
     bool FillPlaybackQueue();
     void PublishState(SessionState from, SessionState next);
 
@@ -58,8 +63,10 @@ private:
     uint64_t loop_end_ns_ = 0;
     std::vector<std::string> active_record_protocols_;
     std::vector<std::string> active_replay_protocols_;
+    std::vector<ReplayTarget> replay_targets_;
     std::string current_record_path_;
     std::string current_playback_file_;
+    PlaybackPacketSnapshot current_playback_packet_;
 };
 
 } // namespace recplay

@@ -185,16 +185,17 @@ bool TcpProtocolService::IsCapturing() const {
 }
 
 bool TcpProtocolService::StartReplay(const std::string& configJson) {
-    RuntimeConfig config;
-    if (!LoadConfig(configJson, config)) {
+    std::vector<RuntimeConfig> configs;
+    if (!LoadReplayConfigs(configJson, configs) || configs.empty()) {
         return false;
     }
 
 #if !RECPLAY_HAS_BOOST_ASIO
-    (void)config;
+    (void)configs;
     return false;
 #else
     try {
+        StopReplay();
         boost::asio::io_context* activeIoContext = nullptr;
         bool startIoThread = false;
         {
@@ -220,26 +221,34 @@ bool TcpProtocolService::StartReplay(const std::string& configJson) {
                 }
             });
         }
- 
-        auto socket = std::make_unique<boost::asio::ip::tcp::socket>(*activeIoContext);
 
-        socket->connect(boost::asio::ip::tcp::endpoint(
-            boost::asio::ip::make_address(config.host),
-            config.port));
+        std::vector<std::unique_ptr<boost::asio::ip::tcp::socket>> sockets;
+        sockets.reserve(configs.size());
+        for (const auto& config : configs) {
+            auto socket = std::make_unique<boost::asio::ip::tcp::socket>(*activeIoContext);
+            socket->connect(boost::asio::ip::tcp::endpoint(
+                boost::asio::ip::make_address(config.host),
+                config.port));
+            sockets.push_back(std::move(socket));
+        }
 
         std::lock_guard<std::mutex> lock(mutex_);
         if (!io_context_) {
             return false;
         }
 
-        replay_socket_ = std::move(socket);
-        replay_config_ = config;
-        replaying_ = true;
-        return true;
+        replay_sockets_ = std::move(sockets);
+        replay_configs_ = std::move(configs);
+        replaying_ = !replay_sockets_.empty();
+        return replaying_;
     } catch (...) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        replay_socket_.reset();
-        replaying_ = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            replay_sockets_.clear();
+            replay_configs_.clear();
+            replaying_ = false;
+        }
+        ResetIoRuntimeIfUnused();
         return false;
     }
 #endif
@@ -254,13 +263,23 @@ bool TcpProtocolService::SendPacket(PacketPtr pkt) {
     return false;
 #else
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!replaying_ || !replay_socket_) {
+    if (!replaying_ || replay_sockets_.empty()) {
         return false;
     }
 
-    boost::system::error_code ec;
-    boost::asio::write(*replay_socket_, boost::asio::buffer(pkt->payload), ec);
-    return !ec;
+    bool sentAny = false;
+    for (auto& socket : replay_sockets_) {
+        if (!socket) {
+            continue;
+        }
+        boost::system::error_code ec;
+        boost::asio::write(*socket, boost::asio::buffer(pkt->payload), ec);
+        if (ec) {
+            return false;
+        }
+        sentAny = true;
+    }
+    return sentAny;
 #endif
 }
 
@@ -268,17 +287,21 @@ void TcpProtocolService::StopReplay() {
 #if RECPLAY_HAS_BOOST_ASIO
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (replay_socket_) {
+        for (auto& socket : replay_sockets_) {
+            if (!socket) {
+                continue;
+            }
             boost::system::error_code ec;
-            replay_socket_->cancel(ec);
-            replay_socket_->close(ec);
-            replay_socket_.reset();
+            socket->cancel(ec);
+            socket->close(ec);
         }
+        replay_sockets_.clear();
     }
     ResetIoRuntimeIfUnused();
 #endif
     std::lock_guard<std::mutex> lock(mutex_);
     replaying_ = false;
+    replay_configs_.clear();
 }
 
 bool TcpProtocolService::IsReplaying() const {
@@ -320,6 +343,41 @@ bool TcpProtocolService::LoadConfig(const std::string& configJson, RuntimeConfig
         config.channel_id = json.value("channel_id", config.channel_id);
         config.channel_name = json.value("channel_name", config.channel_name);
         config.topic = json.value("topic", config.topic);
+        return true;
+    } catch (...) {
+        return false;
+    }
+#endif
+}
+
+bool TcpProtocolService::LoadReplayConfigs(const std::string& configJson, std::vector<RuntimeConfig>& configs) const {
+#if !RECPLAY_HAS_JSON
+    (void)configJson;
+    (void)configs;
+    return false;
+#else
+    try {
+        const auto json = nlohmann::json::parse(configJson.empty() ? "{}" : configJson);
+        configs.clear();
+        if (json.is_array()) {
+            for (const auto& item : json) {
+                RuntimeConfig config;
+                config.mode = item.value("mode", config.mode);
+                config.host = item.value("host", config.host);
+                config.port = static_cast<unsigned short>(item.value("port", static_cast<int>(config.port)));
+                config.channel_id = item.value("channel_id", config.channel_id);
+                config.channel_name = item.value("channel_name", config.channel_name);
+                config.topic = item.value("topic", config.topic);
+                configs.push_back(std::move(config));
+            }
+            return !configs.empty();
+        }
+
+        RuntimeConfig config;
+        if (!LoadConfig(configJson, config)) {
+            return false;
+        }
+        configs.push_back(std::move(config));
         return true;
     } catch (...) {
         return false;
@@ -443,7 +501,7 @@ void TcpProtocolService::ResetIoRuntimeIfUnused() {
     std::thread threadToJoin;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (acceptor_ || !capture_sockets_.empty() || replay_socket_) {
+        if (acceptor_ || !capture_sockets_.empty() || !replay_sockets_.empty()) {
             return;
         }
         if (work_guard_) {
@@ -461,7 +519,7 @@ void TcpProtocolService::ResetIoRuntimeIfUnused() {
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (acceptor_ || !capture_sockets_.empty() || replay_socket_) {
+        if (acceptor_ || !capture_sockets_.empty() || !replay_sockets_.empty()) {
             return;
         }
         work_guard_.reset();

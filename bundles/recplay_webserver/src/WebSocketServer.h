@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "EventLogBuffer.h"
 #include "Packet.h"
 
 #include <atomic>
@@ -28,6 +29,7 @@ public:
         std::atomic<ISessionService*> session{nullptr};
         std::atomic<IStatsService*> stats{nullptr};
         std::vector<std::string> broadcast_messages;
+        EventLogBuffer event_log;
         std::function<void(std::string_view)> transport;
     };
 
@@ -39,7 +41,9 @@ public:
     void SetSessionService(ISessionService* session);
     void SetStatsService(IStatsService* stats);
     void Broadcast(const std::string& message);
+    void BroadcastReplayTargets();
     std::vector<std::string> GetBroadcastMessages() const;
+    std::vector<EventLogEntry> GetEventLogEntries() const;
     void ClearBroadcastMessages();
     void SetTransport(std::function<void(std::string_view)> transport);
 

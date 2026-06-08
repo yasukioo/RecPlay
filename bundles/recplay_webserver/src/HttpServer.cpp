@@ -7,7 +7,9 @@
 #include "IRuntimeCatalog.h"
 #include "IStatsService.h"
 #include "ISessionService.h"
+#include "IStorageService.h"
 #include "StaticFileHandler.h"
+#include "WebSocketServer.h"
 
 #include <cstdint>
 
@@ -25,14 +27,21 @@
 #define RECPLAY_HTTP_SERVER_HAS_JSON 0
 #endif
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstddef>
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
+#include <filesystem>
+#include <iomanip>
+#include <map>
 #include <mutex>
 #include <sstream>
+#include <system_error>
 #include <thread>
+#include <vector>
 
 namespace recplay {
 
@@ -201,6 +210,69 @@ bool TryParseUint64(const std::string& value, uint64_t* parsedValue) {
 
 double SanitizeJsonNumber(double value) {
     return std::isfinite(value) ? value : 0.0;
+}
+
+std::string BuildReplayTargetEndpoint(const std::map<std::string, std::string>& config) {
+    if (const auto endpointIt = config.find("endpoint"); endpointIt != config.end()) {
+        return endpointIt->second;
+    }
+
+    std::string endpoint;
+    if (const auto addressIt = config.find("address"); addressIt != config.end()) {
+        endpoint = addressIt->second;
+        if (const auto portIt = config.find("port"); portIt != config.end()) {
+            endpoint += ":" + portIt->second;
+        }
+        return endpoint;
+    }
+    if (const auto hostIt = config.find("host"); hostIt != config.end()) {
+        endpoint = hostIt->second;
+        if (const auto portIt = config.find("port"); portIt != config.end()) {
+            endpoint += ":" + portIt->second;
+        }
+    }
+    return endpoint;
+}
+
+std::string ResolvePlaybackOpenPath(const std::string& filePath, const std::string& recordingsDir) {
+    namespace fs = std::filesystem;
+
+    if (filePath.empty()) {
+        return {};
+    }
+
+    const fs::path input(filePath);
+    if (input.is_absolute()) {
+        return input.lexically_normal().string();
+    }
+
+    std::error_code ec;
+    if (fs::exists(input, ec) && !ec) {
+        return input.lexically_normal().string();
+    }
+
+    const fs::path candidate = fs::path(recordingsDir) / input;
+    ec.clear();
+    if (fs::exists(candidate, ec) && !ec) {
+        return candidate.lexically_normal().string();
+    }
+
+    return input.lexically_normal().string();
+}
+
+std::string BytesToHex(const std::vector<uint8_t>& payload, std::size_t maxBytes = 256) {
+    std::ostringstream stream;
+    stream << std::hex << std::setfill('0');
+    const std::size_t count = std::min(payload.size(), maxBytes);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i > 0 && i % 16 == 0) {
+            stream << '\n';
+        } else if (i > 0) {
+            stream << ' ';
+        }
+        stream << std::setw(2) << static_cast<unsigned int>(payload[i]);
+    }
+    return stream.str();
 }
 
 bool AppendUtf8CodePoint(uint32_t codePoint, std::string* output) {
@@ -435,6 +507,7 @@ void RegisterDrogonRoutes() {
     registerRoute("GET", "/api/session/state");
     registerRoute("GET", "/api/stats");
     registerRoute("POST", "/api/session/record");
+    registerRoute("POST", "/api/session/reset");
     registerRoute("POST", "/api/session/record/pause");
     registerRoute("POST", "/api/session/record/resume");
     registerRoute("POST", "/api/session/record/stop");
@@ -447,6 +520,13 @@ void RegisterDrogonRoutes() {
     registerRoute("POST", "/api/session/playback/stop");
     registerRoute("GET", "/api/plugins");
     registerRoute("GET", "/api/channels");
+    registerRoute("GET", "/api/files");
+    registerRoute("GET", "/api/markers");
+    registerRoute("GET", "/api/playback/packet");
+    registerRoute("GET", "/api/playback/density");
+    registerRoute("GET", "/api/playback/targets");
+    registerRoute("POST", "/api/playback/targets");
+    registerRoute("GET", "/api/logs");
     registerRoute("GET", "/api/mappings");
     registerRoute("POST", "/api/mappings");
 
@@ -614,8 +694,22 @@ void HttpServer::SetRuntimeCatalog(IRuntimeCatalog* runtimeCatalog) {
     runtime_catalog_.store(runtimeCatalog, std::memory_order_release);
 }
 
+void HttpServer::SetStorageService(IStorageService* storage) {
+    storage_.store(storage, std::memory_order_release);
+}
+
+void HttpServer::SetWebSocketServer(WebSocketServer* webSocketServer) {
+    websocket_server_.store(webSocketServer, std::memory_order_release);
+}
+
 bool HttpServer::SetStaticRoot(const std::string& root) {
     return static_files_.SetRoot(root);
+}
+
+void HttpServer::SetRecordingsDirectory(const std::string& directory) {
+    if (!directory.empty()) {
+        recordings_dir_ = directory;
+    }
 }
 
 HttpResponse HttpServer::HandleRequest(const std::string& method,
@@ -629,6 +723,9 @@ HttpResponse HttpServer::HandleRequest(const std::string& method,
     }
     if (method == "POST" && path == "/api/session/record") {
         return HandleRecordStart(body);
+    }
+    if (method == "POST" && path == "/api/session/reset") {
+        return HandleSessionReset();
     }
     if (method == "POST" && path == "/api/session/record/pause") {
         return HandleRecordPause();
@@ -665,6 +762,27 @@ HttpResponse HttpServer::HandleRequest(const std::string& method,
     }
     if (method == "GET" && path == "/api/channels") {
         return HandleChannels();
+    }
+    if (method == "GET" && path == "/api/files") {
+        return HandleFiles();
+    }
+    if (method == "GET" && path == "/api/markers") {
+        return HandleMarkers();
+    }
+    if (method == "GET" && path == "/api/playback/packet") {
+        return HandlePlaybackPacket();
+    }
+    if (method == "GET" && path == "/api/playback/density") {
+        return HandlePlaybackDensity();
+    }
+    if (method == "GET" && path == "/api/playback/targets") {
+        return HandleReplayTargets();
+    }
+    if (method == "POST" && path == "/api/playback/targets") {
+        return HandleSetReplayTargets(body);
+    }
+    if (method == "GET" && path == "/api/logs") {
+        return HandleLogs();
     }
     if (method == "GET" && path == "/api/mappings") {
         return HandleMappings();
@@ -721,6 +839,15 @@ HttpResponse HttpServer::HandleSessionState() const {
     return MakeJsonResponse(stream.str());
 }
 
+HttpResponse HttpServer::HandleSessionReset() const {
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
+        return MakeErrorResponse(503, "Session service unavailable");
+    }
+    session->Reset();
+    return MakeJsonResponse("{\"ok\":true}");
+}
+
 HttpResponse HttpServer::HandleStats() const {
     auto* stats = stats_.load(std::memory_order_acquire);
     if (stats == nullptr) {
@@ -732,6 +859,7 @@ HttpResponse HttpServer::HandleStats() const {
     stream << "{\"total_throughput_mbps\":" << SanitizeJsonNumber(snapshot.total_throughput_mbps)
            << ",\"total_packets\":" << snapshot.total_packets
            << ",\"total_drops\":" << snapshot.total_drops
+           << ",\"total_bytes\":" << snapshot.total_bytes
            << ",\"drop_rate\":" << SanitizeJsonNumber(snapshot.drop_rate)
            << ",\"write_latency_p99_ms\":" << SanitizeJsonNumber(snapshot.write_latency_p99_ms)
            << ",\"ringbuf_used\":" << snapshot.ringbuf_used
@@ -744,7 +872,35 @@ HttpResponse HttpServer::HandleStats() const {
     } else {
         stream << "null";
     }
-    stream << "}";
+
+    // Per-protocol / per-channel breakdown so the workbenches can show channel
+    // throughput + drops (StatsCollector already aggregates these). Emitted as
+    // JSON objects keyed by protocol name / channel id to match the frontend
+    // StatsSnapshot.per_protocol / per_channel Record<string, …> shape.
+    stream << ",\"per_protocol\":{";
+    bool firstProtocol = true;
+    for (const auto& [name, ps] : snapshot.per_protocol) {
+        if (!firstProtocol) {
+            stream << ",";
+        }
+        firstProtocol = false;
+        stream << "\"" << EscapeJsonString(name) << "\":{"
+               << "\"throughput_mbps\":" << SanitizeJsonNumber(ps.throughput_mbps)
+               << ",\"packets\":" << ps.packets
+               << ",\"drops\":" << ps.drops << "}";
+    }
+    stream << "},\"per_channel\":{";
+    bool firstChannel = true;
+    for (const auto& [channelId, cs] : snapshot.per_channel) {
+        if (!firstChannel) {
+            stream << ",";
+        }
+        firstChannel = false;
+        stream << "\"" << channelId << "\":{"
+               << "\"throughput_mbps\":" << SanitizeJsonNumber(cs.throughput_mbps)
+               << ",\"packets\":" << cs.packets << "}";
+    }
+    stream << "}}";
     return MakeJsonResponse(stream.str());
 }
 
@@ -753,7 +909,28 @@ HttpResponse HttpServer::HandleRecordStart(const std::string& body) const {
     if (session == nullptr) {
         return MakeErrorResponse(503, "Session service unavailable");
     }
-    if (!session->StartRecording(body)) {
+
+    // Resolve a relative output_path against the recordings directory so that
+    // bare filenames like "capture.rpcap" land in the configured data folder
+    // regardless of the process working directory.
+    std::string resolvedBody = body;
+#if RECPLAY_HTTP_SERVER_HAS_JSON
+    try {
+        auto document = nlohmann::json::parse(body.empty() ? "{}" : body);
+        const auto rawPath = document.value("output_path", std::string{});
+        if (!rawPath.empty() && !recordings_dir_.empty()) {
+            namespace fs = std::filesystem;
+            const fs::path input(rawPath);
+            if (!input.is_absolute()) {
+                document["output_path"] =
+                    (fs::path(recordings_dir_) / input).lexically_normal().string();
+                resolvedBody = document.dump();
+            }
+        }
+    } catch (...) {}
+#endif
+
+    if (!session->StartRecording(resolvedBody)) {
         return MakeErrorResponse(400, "Failed to start recording");
     }
     return MakeJsonResponse("{\"ok\":true}");
@@ -796,6 +973,7 @@ HttpResponse HttpServer::HandlePlaybackOpen(const std::string& body) const {
     if (filePath.empty()) {
         return MakeErrorResponse(400, "file_path is required");
     }
+    const auto resolvedFilePath = ResolvePlaybackOpenPath(filePath, recordings_dir_);
 
     // Optional replay target config (UDP/TCP address+port to re-emit packets to).
     // Falls back to "protocol", then to "{}" (protocol service defaults).
@@ -807,9 +985,11 @@ HttpResponse HttpServer::HandlePlaybackOpen(const std::string& body) const {
         replayConfig = "{}";
     }
 
-    if (!session->OpenForPlayback(filePath, replayConfig)) {
-        return MakeErrorResponse(400, "Failed to open playback file: " + filePath);
+    if (!session->OpenForPlayback(resolvedFilePath, replayConfig)) {
+        BroadcastReplayTargetsIfAvailable();
+        return MakeErrorResponse(400, "Failed to open playback file: " + resolvedFilePath);
     }
+    BroadcastReplayTargetsIfAvailable();
     return MakeJsonResponse("{\"ok\":true}");
 }
 
@@ -922,6 +1102,7 @@ HttpResponse HttpServer::HandlePlaybackStop() const {
         return MakeErrorResponse(503, "Session service unavailable");
     }
     session->Stop();
+    BroadcastReplayTargetsIfAvailable();
     return MakeJsonResponse("{\"ok\":true}");
 }
 
@@ -941,6 +1122,9 @@ HttpResponse HttpServer::HandlePlugins() const {
             {"name", plugin.name},
             {"version", plugin.version},
             {"state", plugin.state},
+            {"kind", plugin.kind},
+            {"protocol", plugin.protocol},
+            {"desc", plugin.desc},
             {"bundle_path", plugin.bundle_path},
             {"config_fields", nlohmann::json::array()},
         };
@@ -977,6 +1161,9 @@ HttpResponse HttpServer::HandlePluginDetail(const std::string& pluginId) const {
         {"name", plugin->name},
         {"version", plugin->version},
         {"state", plugin->state},
+        {"kind", plugin->kind},
+        {"protocol", plugin->protocol},
+        {"desc", plugin->desc},
         {"bundle_path", plugin->bundle_path},
         {"config_fields", nlohmann::json::array()},
     };
@@ -1055,16 +1242,293 @@ HttpResponse HttpServer::HandleChannels() const {
 #if !RECPLAY_HTTP_SERVER_HAS_JSON
     return MakeErrorResponse(500, "JSON support unavailable");
 #else
+    const auto* stats = stats_.load(std::memory_order_acquire);
+    const auto snapshot = stats != nullptr ? stats->GetSnapshot() : StatsSnapshot{};
     nlohmann::json response = nlohmann::json::array();
     for (const auto& channel : runtimeCatalog->ListChannels()) {
+        const auto statsIt = snapshot.per_channel.find(channel.numeric_id);
+        const auto* channelStats = statsIt != snapshot.per_channel.end() ? &statsIt->second : nullptr;
         response.push_back({
             {"id", channel.id},
+            {"name", channel.name},
             {"topic", channel.topic},
             {"direction", channel.direction},
             {"protocol", channel.protocol},
             {"plugin_id", channel.plugin_id},
+            {"rate", channelStats != nullptr ? nlohmann::json(channelStats->throughput_mbps) : nlohmann::json(nullptr)},
+            {"packets", channelStats != nullptr ? nlohmann::json(channelStats->packets) : nlohmann::json(nullptr)},
         });
     }
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandleFiles() const {
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    namespace fs = std::filesystem;
+    nlohmann::json files = nlohmann::json::array();
+    auto* storage = storage_.load(std::memory_order_acquire);
+
+    std::error_code ec;
+    const fs::path dir(recordings_dir_);
+    if (fs::exists(dir, ec) && fs::is_directory(dir, ec)) {
+        std::vector<fs::path> paths;
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code fileEc;
+            if (!it->is_regular_file(fileEc) || fileEc) {
+                continue;
+            }
+            if (it->path().extension() == ".rpcap") {
+                paths.push_back(it->path());
+            }
+        }
+        // Newest-first heuristic: capture filenames are timestamp-prefixed, so a
+        // descending name sort approximates recency without reading mtimes.
+        std::sort(paths.begin(), paths.end(), [](const fs::path& a, const fs::path& b) {
+            return a.filename().string() > b.filename().string();
+        });
+
+        for (const auto& path : paths) {
+            std::error_code sizeEc;
+            const auto size = fs::file_size(path, sizeEc);
+            nlohmann::json item;
+            item["name"] = path.filename().string();
+            item["path"] = path.string();
+            item["size"] = sizeEc ? nlohmann::json(nullptr)
+                                  : nlohmann::json(static_cast<uint64_t>(size));
+
+            // Metadata is read through the storage service interface (which owns
+            // the .rpcap format) so the webserver bundle never links the storage
+            // implementation. ProbeFile uses a transient reader, so this is safe
+            // even while a file is open for playback.
+            std::optional<RecordingFileInfo> info;
+            if (storage != nullptr) {
+                info = storage->ProbeFile(path.string());
+            }
+            if (info) {
+                item["duration_ns"] = info->duration_ns;
+                item["channels"] = info->channel_count;
+                item["recorded_at"] = info->creation_time;
+            } else {
+                item["duration_ns"] = nullptr;
+                item["channels"] = nullptr;
+                item["recorded_at"] = nullptr;
+            }
+            files.push_back(std::move(item));
+        }
+    }
+
+    nlohmann::json response = {{"files", files}};
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandleMarkers() const {
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    nlohmann::json markers = nlohmann::json::array();
+
+    // Seed markers from the open playback file's keyframe (chunk-boundary)
+    // timestamps. Returns empty when nothing is open for reading.
+    // CODEX (阶段 8R): replace with real bookmarks / semantic events once a
+    // marker store exists; this is a stand-in so the markers panel has content.
+    auto* storage = storage_.load(std::memory_order_acquire);
+    if (storage != nullptr && storage->IsReading()) {
+        constexpr std::size_t kMaxMarkers = 500;
+        const auto keyframes = storage->GetKeyframeTimestamps();
+        std::size_t index = 0;
+        for (const auto timestamp : keyframes) {
+            if (index >= kMaxMarkers) {
+                break;
+            }
+            markers.push_back({
+                {"timestamp_ns", timestamp},
+                {"label", "Keyframe " + std::to_string(index + 1)},
+                {"type", "event"},
+            });
+            ++index;
+        }
+    }
+
+    nlohmann::json response = {{"markers", markers}};
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandlePlaybackPacket() const {
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
+        return MakeErrorResponse(503, "Session service unavailable");
+    }
+
+    const auto snapshot = session->GetCurrentPlaybackPacket();
+    if (!snapshot.available) {
+        return MakeJsonResponse("null");
+    }
+
+    const auto& packet = snapshot.packet;
+    std::string protocol = "UNKNOWN";
+    switch (static_cast<ProtocolId>(packet.protocol_id)) {
+        case ProtocolId::kUDP:
+            protocol = "UDP";
+            break;
+        case ProtocolId::kTCP:
+            protocol = "TCP";
+            break;
+        case ProtocolId::kDDS:
+            protocol = "DDS";
+            break;
+        case ProtocolId::kHLA:
+            protocol = "HLA";
+            break;
+        case ProtocolId::kSerial:
+            protocol = "Serial";
+            break;
+        default:
+            break;
+    }
+    nlohmann::json response = {
+        {"channel", packet.channel_id},
+        {"plugin", protocol},
+        {"protocol", protocol},
+        {"seq", packet.sequence},
+        {"t_record", packet.t_record},
+        {"t_replay", snapshot.replay_timestamp_ns},
+        {"size", packet.payload.size()},
+        {"topic", packet.topic},
+        {"writer", snapshot.writer},
+        {"hex", BytesToHex(packet.payload)},
+    };
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandlePlaybackDensity() const {
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    auto* storage = storage_.load(std::memory_order_acquire);
+    if (storage == nullptr) {
+        return MakeErrorResponse(503, "Storage service unavailable");
+    }
+
+    constexpr uint32_t kDensityBuckets = 256;
+    const auto total = storage->GetDensity(kDensityBuckets);
+    const auto header = storage->GetHeader();
+
+    nlohmann::json totalJson = nlohmann::json::array();
+    for (const auto value : total) {
+        totalJson.push_back(value);
+    }
+
+    nlohmann::json response = {
+        {"duration_ns", header.duration_ns},
+        {"buckets", total.size()},
+        {"total", std::move(totalJson)},
+    };
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandleReplayTargets() const {
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
+        return MakeErrorResponse(503, "Session service unavailable");
+    }
+
+    nlohmann::json targets = nlohmann::json::array();
+    for (const auto& target : session->GetReplayTargets()) {
+        targets.push_back({
+            {"id", target.id},
+            {"name", target.name},
+            {"protocol", target.protocol},
+            {"enabled", target.enabled},
+            {"endpoint", BuildReplayTargetEndpoint(target.config)},
+            {"status", target.status.empty() ? "idle" : target.status},
+        });
+    }
+
+    nlohmann::json response = {{"targets", std::move(targets)}};
+    return MakeJsonResponse(response.dump());
+#endif
+}
+
+HttpResponse HttpServer::HandleSetReplayTargets(const std::string& body) const {
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    (void)body;
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    auto* session = session_.load(std::memory_order_acquire);
+    if (session == nullptr) {
+        return MakeErrorResponse(503, "Session service unavailable");
+    }
+
+    try {
+        const auto document = nlohmann::json::parse(body.empty() ? "{}" : body);
+        const auto targetsJson = document.value("targets", nlohmann::json::array());
+        std::vector<ISessionService::ReplayTarget> targets;
+        for (const auto& item : targetsJson) {
+            ISessionService::ReplayTarget target;
+            target.id = item.value("id", std::string{});
+            target.name = item.value("name", std::string{});
+            target.protocol = item.value("protocol", std::string{});
+            target.enabled = item.value("enabled", true);
+            if (item.contains("endpoint") && item.at("endpoint").is_string()) {
+                const auto endpoint = item.at("endpoint").get<std::string>();
+                target.config["endpoint"] = endpoint;
+                const auto colonPos = endpoint.rfind(':');
+                if (colonPos != std::string::npos) {
+                    const auto host = endpoint.substr(0, colonPos);
+                    const auto port = endpoint.substr(colonPos + 1);
+                    if (target.protocol == "UDP") {
+                        target.config["address"] = host;
+                        target.config["port"] = port;
+                        target.config["bind_interface"] = "0.0.0.0";
+                    } else if (target.protocol == "TCP") {
+                        target.config["host"] = host;
+                        target.config["port"] = port;
+                        target.config["mode"] = "client";
+                    }
+                }
+            }
+            targets.push_back(std::move(target));
+        }
+
+        session->SetReplayTargets(targets);
+        BroadcastReplayTargetsIfAvailable();
+        return HandleReplayTargets();
+    } catch (...) {
+        return MakeErrorResponse(400, "Invalid replay targets payload");
+    }
+#endif
+}
+
+HttpResponse HttpServer::HandleLogs() const {
+#if !RECPLAY_HTTP_SERVER_HAS_JSON
+    return MakeErrorResponse(500, "JSON support unavailable");
+#else
+    nlohmann::json entries = nlohmann::json::array();
+    if (auto* webSocketServer = websocket_server_.load(std::memory_order_acquire);
+        webSocketServer != nullptr) {
+        for (const auto& entry : webSocketServer->GetEventLogEntries()) {
+            entries.push_back({
+                {"ts", entry.timestamp_ms},
+                {"level", entry.level},
+                {"message", entry.message},
+                {"source", entry.source},
+            });
+        }
+    }
+    nlohmann::json response = {{"entries", std::move(entries)}};
     return MakeJsonResponse(response.dump());
 #endif
 }
@@ -1118,6 +1582,13 @@ HttpResponse HttpServer::HandleSetMappings(const std::string& body) const {
         return MakeErrorResponse(400, "Invalid topic mapping payload");
     }
 #endif
+}
+
+void HttpServer::BroadcastReplayTargetsIfAvailable() const {
+    if (auto* webSocketServer = websocket_server_.load(std::memory_order_acquire);
+        webSocketServer != nullptr) {
+        webSocketServer->BroadcastReplayTargets();
+    }
 }
 
 HttpResponse HttpServer::MakeJsonResponse(std::string body, int statusCode) {

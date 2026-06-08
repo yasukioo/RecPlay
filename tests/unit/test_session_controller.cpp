@@ -29,8 +29,10 @@ using recplay::IStorageService;
 using recplay::Packet;
 using recplay::PacketCallback;
 using recplay::PacketPtr;
+using recplay::RecordingFileInfo;
 using recplay::RpcapHeader;
 using recplay::SessionController;
+using recplay::ISessionService;
 using recplay::SessionState;
 
 void Expect(bool condition, const std::string& message) {
@@ -132,6 +134,14 @@ public:
         return {};
     }
 
+    std::optional<RecordingFileInfo> ProbeFile(const std::string&) const override {
+        return std::nullopt;
+    }
+
+    std::vector<uint64_t> GetDensity(uint32_t) const override {
+        return {};
+    }
+
     bool IsWriting() const override {
         return writing;
     }
@@ -193,6 +203,11 @@ public:
     bool IsCapturing() const override { return capture_started; }
 
     bool StartReplay(const std::string& configJson) override {
+        if (fail_replay_on_empty_config && (configJson.empty() || configJson == "{}")) {
+            last_replay_config = configJson;
+            replay_started = false;
+            return false;
+        }
         replay_started = true;
         last_replay_config = configJson;
         return true;
@@ -226,6 +241,7 @@ public:
     std::string last_replay_config;
     bool capture_started = false;
     bool replay_started = false;
+    bool fail_replay_on_empty_config = false;
 };
 
 void TestRecordingLifecycle() {
@@ -299,6 +315,11 @@ void TestPlaybackLifecycle() {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     Expect(!udp.replayed_packets.empty(), "scheduler should dispatch playback packets");
+    const auto packetSnapshot = controller.GetCurrentPlaybackPacket();
+    Expect(packetSnapshot.available, "current playback packet snapshot should become available");
+    Expect(packetSnapshot.packet.t_capture == udp.replayed_packets.back()->t_capture,
+           "snapshot should track the last dispatched packet");
+    Expect(packetSnapshot.writer == "capture.rpcap", "snapshot should retain current playback file");
 
     controller.Pause();
     Expect(controller.GetState() == SessionState::PlaybackPaused, "state should pause playback");
@@ -311,6 +332,8 @@ void TestPlaybackLifecycle() {
     Expect(controller.GetState() == SessionState::Stopped, "stop should end playback");
     Expect(storage.closed, "storage should close playback file");
     Expect(!udp.replay_started, "protocol replay should stop");
+    Expect(!controller.GetCurrentPlaybackPacket().available,
+           "stop should clear the current playback packet snapshot");
 }
 
 void TestPlaybackQueueIsRefilledIncrementally() {
@@ -360,6 +383,86 @@ void TestPlaybackCanInferUdpProtocolWhenSchemaIsEmpty() {
     Expect(opened, "playback should open when schema is empty but replay config identifies UDP");
     Expect(udp.replay_started, "UDP replay should be inferred from replay config");
     Expect(!tcp.replay_started, "TCP replay should stay stopped when replay config identifies UDP");
+
+    controller.Stop();
+}
+
+void TestPlaybackUsesConfiguredReplayTargets() {
+    CoreEngine engine;
+    FakeStorageService storage;
+    FakeProtocolService udp("UDP");
+    FakeProtocolService tcp("TCP");
+
+    storage.playback_duration_ns = 200;
+    storage.playback_packets = {MakePacket(10, 3), MakePacket(40, 3), MakePacket(90, 3)};
+    storage.playback_channels = {ChannelInfo{7, "tcp-src", "TCP", "tcp/topic", {}}};
+
+    engine.SetStorageService(&storage);
+    engine.AttachProtocol("UDP", &udp);
+    engine.AttachProtocol("TCP", &tcp);
+
+    SessionController controller(&engine);
+    controller.SetReplayTargets({
+        ISessionService::ReplayTarget{
+            "udp-a",
+            "UDP A",
+            "UDP",
+            true,
+            "idle",
+            {{"address", "239.1.1.1"}, {"port", "5000"}, {"bind_interface", "0.0.0.0"}},
+        },
+        ISessionService::ReplayTarget{
+            "udp-b",
+            "UDP B",
+            "UDP",
+            true,
+            "idle",
+            {{"address", "239.1.1.2"}, {"port", "5001"}, {"bind_interface", "0.0.0.0"}},
+        },
+    });
+
+    const bool opened = controller.OpenForPlayback("capture.rpcap");
+
+    Expect(opened, "playback should open with configured replay targets");
+    Expect(udp.replay_started, "UDP replay should start from configured target");
+    Expect(!tcp.replay_started, "schema protocol should not override explicit replay targets");
+    Expect(udp.last_replay_config.find("[") != std::string::npos,
+           "same-protocol replay targets should be forwarded as an array config");
+    Expect(udp.last_replay_config.find("\"address\":\"239.1.1.1\"") != std::string::npos,
+           "first target config should be forwarded to replay protocol");
+    Expect(udp.last_replay_config.find("\"address\":\"239.1.1.2\"") != std::string::npos,
+           "second target config should be forwarded to replay protocol");
+    const auto activeTargets = controller.GetReplayTargets();
+    Expect(activeTargets.size() == 2, "configured replay targets should be retained");
+    Expect(activeTargets[0].status == "active" && activeTargets[1].status == "active",
+           "successful playback open should mark enabled replay targets active");
+
+    controller.Stop();
+    const auto stoppedTargets = controller.GetReplayTargets();
+    Expect(stoppedTargets[0].status == "idle" && stoppedTargets[1].status == "idle",
+           "stopping playback should return replay targets to idle");
+}
+
+void TestPlaybackSkipsTcpAutoReplayWithoutRunnableTarget() {
+    CoreEngine engine;
+    FakeStorageService storage;
+    FakeProtocolService tcp("TCP");
+
+    storage.playback_duration_ns = 200;
+    storage.playback_packets = {MakePacket(10, 3), MakePacket(40, 3), MakePacket(90, 3)};
+    storage.playback_channels = {ChannelInfo{7, "tcp-src", "TCP", "tcp/topic", {}}};
+    tcp.fail_replay_on_empty_config = true;
+
+    engine.SetStorageService(&storage);
+    engine.AttachProtocol("TCP", &tcp);
+
+    SessionController controller(&engine);
+    const bool opened = controller.OpenForPlayback("capture.rpcap");
+
+    Expect(opened, "playback should still open when TCP replay has no runnable target config");
+    Expect(controller.GetState() == SessionState::Stopped, "playback should remain staged in Stopped state");
+    Expect(!tcp.replay_started, "TCP replay should be skipped when no runnable config is available");
+    Expect(controller.GetDuration() == 200, "duration should still come from opened file");
 
     controller.Stop();
 }
@@ -528,6 +631,8 @@ int main() {
         TestPlaybackLifecycle();
         TestPlaybackQueueIsRefilledIncrementally();
         TestPlaybackCanInferUdpProtocolWhenSchemaIsEmpty();
+        TestPlaybackUsesConfiguredReplayTargets();
+        TestPlaybackSkipsTcpAutoReplayWithoutRunnableTarget();
         TestLoopPlaybackReturnsToLoopStart();
         TestInvalidIdleActionsAreNoOps();
         TestStopDuringSeekingStillCleansUpPlayback();

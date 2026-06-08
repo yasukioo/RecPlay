@@ -51,6 +51,7 @@ private:
     };
 
     bool LoadConfig(const std::string& configJson, RuntimeConfig& config) const;
+    bool LoadReplayConfigs(const std::string& configJson, std::vector<RuntimeConfig>& configs) const;
     void StartAcceptLoop();
 #if RECPLAY_HAS_BOOST_ASIO
     void StartReadLoop(
@@ -66,13 +67,13 @@ private:
     std::vector<ChannelInfo> channels_;
     PacketCallback capture_callback_;
     RuntimeConfig capture_config_;
-    RuntimeConfig replay_config_;
+    std::vector<RuntimeConfig> replay_configs_;
 
 #if RECPLAY_HAS_BOOST_ASIO
     std::unique_ptr<boost::asio::io_context> io_context_;
     std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard_;
     std::unique_ptr<boost::asio::ip::tcp::acceptor> acceptor_;
-    std::unique_ptr<boost::asio::ip::tcp::socket> replay_socket_;
+    std::vector<std::unique_ptr<boost::asio::ip::tcp::socket>> replay_sockets_;
     std::vector<std::shared_ptr<boost::asio::ip::tcp::socket>> capture_sockets_;
     std::thread io_thread_;
     std::atomic<uint32_t> sequence_{0};

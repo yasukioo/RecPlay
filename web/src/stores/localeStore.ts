@@ -6,6 +6,7 @@ export const LOCALE_STORAGE_KEY = "recplay-locale";
 
 interface StorageReader {
   getItem: (key: string) => string | null;
+  setItem?: (key: string, value: string) => void;
 }
 
 interface LocaleStoreState {
@@ -24,11 +25,16 @@ export function getInitialLocale(storage: StorageReader | null = resolveStorage(
 
 export const useLocaleStore = create<LocaleStoreState>((set) => ({
   locale: getInitialLocale(),
-  setLocale: (locale) => set({ locale }),
+  setLocale: (locale) => {
+    persistLocale(locale);
+    set({ locale });
+  },
   toggleLocale: () =>
-    set((current) => ({
-      locale: current.locale === "en-US" ? "zh-CN" : "en-US",
-    })),
+    set((current) => {
+      const locale = current.locale === "en-US" ? "zh-CN" : "en-US";
+      persistLocale(locale);
+      return { locale };
+    }),
 }));
 
 function resolveStorage(): StorageReader | null {
@@ -37,4 +43,8 @@ function resolveStorage(): StorageReader | null {
   }
 
   return window.localStorage;
+}
+
+function persistLocale(locale: Locale): void {
+  resolveStorage()?.setItem?.(LOCALE_STORAGE_KEY, locale);
 }
