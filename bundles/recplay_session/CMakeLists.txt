@@ -1,0 +1,3 @@
+recplay_add_bundle(recplay_session EXTRA_LIBS recplay_spdlog recplay_json)
+target_include_directories(recplay_session PRIVATE ${PROJECT_SOURCE_DIR}/bundles/recplay_core/src)
+target_link_libraries(recplay_session PRIVATE recplay_core)

@@ -1,0 +1,33 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+@import "./drr.css";
+
+/*
+ * RecPlay frontend styles.
+ *
+ * Layer 1 — ./drr.css: the "DRR — Data Record & Replay" design system ported
+ *   verbatim from docs/RecPlay _.html (tokens + .app/.titlebar/.tool/.panel/...).
+ *   The new shell (views/AppShell.tsx + views/*) is built on these classes.
+ *
+ * Layer 2 — the hmi-* @theme below: legacy tokens from the phase-8 layout so the
+ *   older components (RecordPanel, MonitorDashboard, ...) still compile/preview
+ *   while CODEX folds them into the new workbenches. Safe to delete once the
+ *   migration in CODEX_PLAN.md 阶段 8R is complete.
+ */
+@theme {
+  --color-hmi-bg: #1a1d23;
+  --color-hmi-surface: #22262e;
+  --color-hmi-surface-alt: #2a2f38;
+  --color-hmi-border: #3a3f4a;
+  --color-hmi-text: #e8eaed;
+  --color-hmi-text-muted: #9aa0a8;
+  --color-hmi-accent: #4fc3f7;
+  --color-hmi-accent-dim: #0277bd;
+  --color-hmi-success: #66bb6a;
+  --color-hmi-warning: #ffa726;
+  --color-hmi-danger: #ef5350;
+}
+
+#root {
+  min-height: 100vh;
+}
